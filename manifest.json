@@ -1,0 +1,19 @@
+{
+  "name": "CA Alerta",
+  "short_name": "CA Alerta",
+  "description": "Acompanhamento de vencimentos de Certificados de Aprovação.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f8f6",
+  "theme_color": "#0f755b",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Acompanhe vencimentos de Certificados de Aprovação a partir de uma planilha XLSX." />
+    <meta name="theme-color" content="#0f755b" />
+    <title>CA Alerta</title>
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="#" aria-label="CA Alerta - início">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2.4 20 5.7v5.8c0 5.1-3.3 8.7-8 10.1-4.7-1.4-8-5-8-10.1V5.7L12 2.4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>
+          </span>
+          <span>CA<span>Alerta</span></span>
+        </a>
+        <div class="topbar-actions">
+          <button class="icon-button notification-button" id="notificationButton" aria-label="Ver notificações" aria-controls="notificationPanel" aria-expanded="false" hidden>
+            <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg>
+            <span class="notification-dot" id="notificationDot"></span>
+          </button>
+          <button class="import-button" id="importButton" type="button">
+            <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 20h14"/></svg>
+            <span id="importButtonLabel">Importar XLSX</span>
+          </button>
+          <input type="file" id="fileInput" accept=".xlsx" hidden />
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="upload-view" id="uploadState">
+        <div class="upload-copy">
+          <span class="eyebrow">CONTROLE DE CONFORMIDADE</span>
+          <h1>Descubra quais CAs estão perto de vencer</h1>
+          <p>Importe sua planilha e antecipe as renovações com alertas até 8 meses antes do vencimento.</p>
+        </div>
+
+        <button class="drop-zone" id="dropZone" type="button">
+          <span class="upload-illustration" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>
+          </span>
+          <strong>Selecione ou arraste sua planilha</strong>
+          <span>Arquivo no formato .xlsx</span>
+          <span class="select-file" id="selectFileLabel">Selecionar XLSX</span>
+        </button>
+
+        <div class="upload-info">
+          <div>
+            <span class="info-icon"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v5h5M8 12h7M8 16h7"/></svg></span>
+            <div><strong>Colunas necessárias</strong><p>CNPJ, Razão Social e Data de Validade. Registro CA, Referência e CNAE também são reconhecidos.</p></div>
+          </div>
+          <div>
+            <span class="info-icon"><svg viewBox="0 0 24 24"><path d="M12 3 4 6.5v5.2c0 4.8 3.2 8.1 8 9.3 4.8-1.2 8-4.5 8-9.3V6.5L12 3Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg></span>
+            <div><strong>Atualização automática</strong><p>No Chrome ou Edge, vincule o arquivo para refletir alterações salvas pelo Excel enquanto o app estiver aberto.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="dashboard-view" id="dataView" hidden>
+        <div class="hero-row">
+          <div>
+            <p class="eyebrow">CONTROLE DE CONFORMIDADE</p>
+            <h1>Visão geral dos certificados</h1>
+            <p class="hero-subtitle">Acompanhe prazos e antecipe as renovações.</p>
+          </div>
+          <div class="file-area">
+            <div class="file-status">
+              <span class="file-status-icon"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v5h5"/></svg></span>
+              <div>
+                <small>Base salva neste navegador</small>
+                <strong id="currentFileName">—</strong>
+                <span id="lastUpdated">—</span>
+                <span id="syncStatus">Importação manual</span>
+                <button class="sync-files-button" id="syncFilesButton" type="button" hidden>Verificar agora</button>
+              </div>
+            </div>
+            <button class="clear-data-button" id="clearDataButton" type="button">Limpar base</button>
+          </div>
+        </div>
+
+        <section class="notification-setup" id="notificationSetup">
+          <span class="notification-setup-icon"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg></span>
+          <div><strong id="notificationSetupTitle">Ative os avisos de vencimento</strong><p id="notificationSetupText">Receba uma notificação para CAs vencidos ou que vencem nos próximos 8 meses.</p></div>
+          <button id="enableNotificationsButton" type="button">Ativar notificações</button>
+        </section>
+
+        <div class="stats-grid" id="statsGrid">
+          <article class="stat-card stat-total" data-filter="todos" role="button" tabindex="0">
+            <div class="stat-icon"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v5h5M8 12h7M8 16h5"/></svg></div>
+            <div><span>Total monitorado</span><strong id="statTotal">0</strong><small>certificados</small></div>
+          </article>
+          <article class="stat-card stat-danger" data-filter="vencido" role="button" tabindex="0">
+            <div class="stat-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg></div>
+            <div><span>Vencidos</span><strong id="statExpired">0</strong><small id="expiredHint">ação imediata</small></div>
+          </article>
+          <article class="stat-card stat-warning" data-filter="urgente" role="button" tabindex="0">
+            <div class="stat-icon"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4M12 16.5h.01"/></svg></div>
+            <div><span>Vencem em 30 dias</span><strong id="statUrgent">0</strong><small>prioridade alta</small></div>
+          </article>
+          <article class="stat-card stat-attention" data-filter="atencao" role="button" tabindex="0">
+            <div class="stat-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+            <div><span>De 31 dias a 8 meses</span><strong id="statAttention">0</strong><small>iniciar renovação</small></div>
+          </article>
+        </div>
+
+        <section class="insight-card" id="insightCard">
+          <div class="insight-visual"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg></div>
+          <div class="insight-copy"><span class="eyebrow">RESUMO DOS ALERTAS</span><h2 id="insightTitle">Seus certificados estão em dia</h2><p id="insightText">Nenhuma renovação urgente foi encontrada.</p></div>
+          <button id="viewUrgentButton" type="button">Ver prioridades <span>→</span></button>
+        </section>
+
+        <section class="table-section" id="certificados">
+          <div class="section-head">
+            <div><h2>Certificados monitorados</h2><p id="resultSummary">0 registros</p></div>
+            <div class="table-actions">
+              <label class="search-box">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                <input id="searchInput" type="search" placeholder="Buscar empresa, CNPJ ou CA" />
+              </label>
+              <select id="statusFilter" aria-label="Filtrar por status">
+                <option value="todos">Todos os status</option>
+                <option value="vencido">Vencidos</option>
+                <option value="urgente">Até 30 dias</option>
+                <option value="atencao">31 dias a 8 meses</option>
+                <option value="emdia">Além de 8 meses</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Empresa</th><th>CNPJ</th><th>CA / Referência</th><th>Validade</th><th>Status</th><th><span class="sr-only">Ações</span></th></tr></thead>
+              <tbody id="certificateRows"></tbody>
+            </table>
+            <div class="empty-state" id="emptyState" hidden><span>⌕</span><h3>Nenhum certificado encontrado</h3><p>Ajuste a busca ou selecione outro status.</p></div>
+          </div>
+          <div class="table-foot"><span id="paginationText">Mostrando 0 registros</span><div class="legend"><span><i class="dot danger"></i>Vencido</span><span><i class="dot warning"></i>Até 30 dias</span><span><i class="dot attention"></i>Até 8 meses</span><span><i class="dot success"></i>Além de 8 meses</span></div></div>
+        </section>
+      </section>
+    </main>
+
+    <div class="notification-panel" id="notificationPanel" hidden>
+      <div class="panel-head"><div><span class="eyebrow">CENTRAL DE ALERTAS</span><h3>Notificações</h3></div><span class="alert-count" id="alertCount">0</span></div>
+      <div id="notificationList" class="notification-list"></div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"><span class="toast-icon">✓</span><div><strong id="toastTitle">Planilha importada</strong><p id="toastMessage">Os registros foram atualizados.</p></div><button id="closeToast" aria-label="Fechar">×</button></div>
+
+    <dialog id="detailDialog">
+      <button class="dialog-close" id="closeDialog" aria-label="Fechar">×</button>
+      <span class="eyebrow">DETALHES DO CERTIFICADO</span>
+      <h2 id="dialogCompany">—</h2>
+      <div class="dialog-grid">
+        <div><small>CNPJ</small><strong id="dialogCnpj">—</strong></div>
+        <div><small>Número do CA</small><strong id="dialogRegistration">—</strong></div>
+        <div class="dialog-wide"><small>Data de validade</small><strong id="dialogDate">—</strong></div>
+        <div class="dialog-wide"><small>Referência / CNAE</small><strong id="dialogReference">—</strong></div>
+      </div>
+      <div class="dialog-status" id="dialogStatus"></div>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>
