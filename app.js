@@ -11,6 +11,7 @@ const linkedFileErrors = new Map();
 let linkedFilesInitialized = false;
 let fileSyncInProgress = false;
 let fileSyncTimer = null;
+let deferredInstallPrompt = null;
 const savedBase = loadPersistentBase();
 
 const state = {
@@ -34,6 +35,11 @@ const els = {
   notificationButton: document.querySelector("#notificationButton"),
   notificationSetup: document.querySelector("#notificationSetup"),
   enableNotificationsButton: document.querySelector("#enableNotificationsButton"),
+  installPrompt: document.querySelector("#installPrompt"),
+  installPromptTitle: document.querySelector("#installPromptTitle"),
+  installPromptText: document.querySelector("#installPromptText"),
+  installAppButton: document.querySelector("#installAppButton"),
+  installDialog: document.querySelector("#installDialog"),
   clearDataButton: document.querySelector("#clearDataButton"),
   syncStatus: document.querySelector("#syncStatus"),
   syncFilesButton: document.querySelector("#syncFilesButton"),
@@ -72,6 +78,57 @@ function savePersistentBase(base = state) {
 
 function supportsLinkedFiles() {
   return "showOpenFilePicker" in window && "indexedDB" in window;
+}
+
+function isIOSDevice() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneApp() {
+  return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+function supportsSystemNotifications() {
+  return "Notification" in window
+    && "serviceWorker" in navigator
+    && "ServiceWorkerRegistration" in window
+    && "showNotification" in ServiceWorkerRegistration.prototype;
+}
+
+function openInstallDialog() {
+  if (typeof els.installDialog.showModal === "function") {
+    els.installDialog.showModal();
+  } else {
+    els.installDialog.setAttribute("open", "");
+  }
+}
+
+function closeInstallDialog() {
+  if (typeof els.installDialog.close === "function") {
+    els.installDialog.close();
+  } else {
+    els.installDialog.removeAttribute("open");
+  }
+}
+
+function updateInstallExperience() {
+  const installed = isStandaloneApp();
+  const ios = isIOSDevice();
+  const canPrompt = Boolean(deferredInstallPrompt);
+
+  els.installPrompt.hidden = installed || (!ios && !canPrompt);
+  if (installed) return;
+
+  if (ios) {
+    els.installPromptTitle.textContent = "Instale o CA Alerta no iPhone";
+    els.installPromptText.textContent = "Adicione à Tela de Início para usar em tela cheia e liberar notificações no iOS.";
+    els.installAppButton.textContent = "Como instalar";
+  } else if (canPrompt) {
+    els.installPromptTitle.textContent = "Instale o CA Alerta";
+    els.installPromptText.textContent = "Abra o painel como aplicativo e mantenha o acesso mais fácil.";
+    els.installAppButton.textContent = "Instalar";
+  }
 }
 
 function openFileHandleDatabase() {
@@ -151,7 +208,9 @@ function sourceMatchesFile(source, file) {
 function updateFileSyncStatus() {
   if (!els.syncStatus || !els.syncFilesButton) return;
   if (!supportsLinkedFiles()) {
-    els.syncStatus.textContent = "Atualização automática indisponível neste navegador";
+    els.syncStatus.textContent = isIOSDevice()
+      ? "No iPhone, importe o XLSX novamente para atualizar"
+      : "Atualização automática indisponível neste navegador";
     els.syncFilesButton.hidden = true;
     return;
   }
@@ -256,6 +315,7 @@ function filteredCertificates() {
 
 function render() {
   const hasData = state.certificates.length > 0;
+  updateInstallExperience();
   els.uploadState.hidden = hasData;
   els.dataView.hidden = !hasData;
   els.notificationButton.hidden = !hasData;
@@ -276,12 +336,12 @@ function render() {
     const certificate = certificateDisplay(item);
     const originalIndex = indexByItem.get(item);
     return `<tr>
-      <td><div class="company-cell"><span class="company-logo">${escapeHtml(initials(item.company))}</span><div><strong title="${escapeHtml(item.company)}">${escapeHtml(item.company)}</strong><small>Cliente monitorado</small></div></div></td>
-      <td>${escapeHtml(item.cnpj)}</td>
-      <td class="certificate-cell"><span class="certificate-code">${escapeHtml(certificate.code)}</span><span class="certificate-description" title="${escapeHtml(certificate.description)}">${escapeHtml(certificate.description)}</span></td>
-      <td><div class="date-cell"><strong>${formatDate(item.expiry)}</strong><small>${escapeHtml(status.detail)}</small></div></td>
-      <td><span class="status-badge status-${status.key}">${escapeHtml(status.label)}</span></td>
-      <td><button class="row-action" data-detail="${originalIndex}" aria-label="Ver detalhes de ${escapeHtml(item.company)}">•••</button></td>
+      <td data-label="Empresa"><div class="company-cell"><span class="company-logo">${escapeHtml(initials(item.company))}</span><div><strong title="${escapeHtml(item.company)}">${escapeHtml(item.company)}</strong><small>Cliente monitorado</small></div></div></td>
+      <td data-label="CNPJ">${escapeHtml(item.cnpj)}</td>
+      <td class="certificate-cell" data-label="CA / Referência"><span class="certificate-code">${escapeHtml(certificate.code)}</span><span class="certificate-description" title="${escapeHtml(certificate.description)}">${escapeHtml(certificate.description)}</span></td>
+      <td data-label="Validade"><div class="date-cell"><strong>${formatDate(item.expiry)}</strong><small>${escapeHtml(status.detail)}</small></div></td>
+      <td data-label="Status"><span class="status-badge status-${status.key}">${escapeHtml(status.label)}</span></td>
+      <td class="row-actions-cell"><button class="row-action" data-detail="${originalIndex}" aria-label="Ver detalhes de ${escapeHtml(item.company)}">•••</button></td>
     </tr>`;
   }).join("");
   els.empty.hidden = filtered.length > 0;
@@ -311,6 +371,19 @@ function renderStats() {
   document.querySelector("#insightTitle").textContent = priorities ? `${priorities} ${priorities === 1 ? "certificado requer" : "certificados requerem"} sua atenção` : "Seus certificados estão em dia";
   document.querySelector("#insightText").textContent = priorities ? `Há ${counts.vencido} vencido(s), ${counts.urgente} em até 30 dias e ${counts.atencao} na janela de renovação de ${RENEWAL_MONTHS} meses.` : `Nenhuma renovação prevista para os próximos ${RENEWAL_MONTHS} meses.`;
   document.querySelector("#notificationDot").hidden = priorities === 0;
+  updateAppBadge(priorities);
+}
+
+function updateAppBadge(count) {
+  try {
+    if (count > 0 && "setAppBadge" in navigator) {
+      navigator.setAppBadge(count).catch(() => {});
+    } else if ("clearAppBadge" in navigator) {
+      navigator.clearAppBadge().catch(() => {});
+    }
+  } catch {
+    // Badges são um aprimoramento opcional e não devem interromper o painel.
+  }
 }
 
 function renderNotifications() {
@@ -327,20 +400,33 @@ function updateNotificationSetup() {
   const title = document.querySelector("#notificationSetupTitle");
   const text = document.querySelector("#notificationSetupText");
   els.notificationSetup.classList.remove("enabled", "blocked");
+  els.enableNotificationsButton.hidden = false;
+  els.enableNotificationsButton.disabled = false;
+  els.enableNotificationsButton.dataset.action = "notifications";
 
-  if (!("Notification" in window)) {
+  if (isIOSDevice() && !isStandaloneApp()) {
     els.notificationSetup.classList.add("blocked");
-    title.textContent = "Notificações indisponíveis neste navegador";
-    text.textContent = "Abra o site em uma versão atual do Chrome, Edge, Firefox ou Safari.";
+    title.textContent = "Instale o app para ativar notificações";
+    text.textContent = "No iPhone, os avisos só podem ser autorizados no CA Alerta aberto pela Tela de Início.";
+    els.enableNotificationsButton.textContent = "Como instalar";
+    els.enableNotificationsButton.dataset.action = "install";
+    return;
+  }
+
+  if (!supportsSystemNotifications()) {
+    els.notificationSetup.classList.add("blocked");
+    title.textContent = isIOSDevice() ? "Atualize o iPhone para receber avisos" : "Notificações indisponíveis neste navegador";
+    text.textContent = isIOSDevice()
+      ? "O CA Alerta precisa do iOS 16.4 ou superior para usar notificações na Tela de Início."
+      : "Use uma versão atual do Chrome, Edge, Firefox ou Safari.";
     els.enableNotificationsButton.hidden = true;
     return;
   }
 
-  els.enableNotificationsButton.hidden = false;
   if (Notification.permission === "granted") {
     els.notificationSetup.classList.add("enabled");
     title.textContent = "Notificações ativadas";
-    text.textContent = `O navegador avisará sobre CAs vencidos ou com vencimento nos próximos ${RENEWAL_MONTHS} meses.`;
+    text.textContent = `Os avisos são verificados quando você abre ou volta ao app. Toque ao lado para testar agora.`;
     els.enableNotificationsButton.textContent = "Testar aviso";
   } else if (Notification.permission === "denied") {
     els.notificationSetup.classList.add("blocked");
@@ -358,22 +444,26 @@ function updateNotificationSetup() {
 
 async function showBrowserNotification(title, options = {}) {
   const notificationOptions = {
-    icon: "icon.svg",
-    badge: "icon.svg",
+    icon: new URL("icon-192.png", document.baseURI).href,
+    badge: new URL("icon-192.png", document.baseURI).href,
     ...options
   };
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
-    const registration = await navigator.serviceWorker.getRegistration();
-    if (registration) {
+    const registration = await navigator.serviceWorker.ready;
+    if ("showNotification" in registration) {
       await registration.showNotification(title, notificationOptions);
       return;
     }
   }
-  new Notification(title, notificationOptions);
+  if (typeof Notification === "function") {
+    new Notification(title, notificationOptions);
+    return;
+  }
+  throw new Error("Notificações do sistema indisponíveis.");
 }
 
 async function requestNotifications() {
-  if (!("Notification" in window)) return;
+  if (!supportsSystemNotifications()) return;
   try {
     if (Notification.permission === "granted") {
       await showBrowserNotification("CA Alerta está ativo", { body: "Os avisos de vencimento estão funcionando.", tag: "ca-alerta-teste" });
@@ -383,6 +473,10 @@ async function requestNotifications() {
     updateNotificationSetup();
     if (permission === "granted") {
       showToast("Notificações ativadas", "Você receberá avisos sobre os CAs prioritários.");
+      await showBrowserNotification("CA Alerta está ativo", {
+        body: "Os avisos estão funcionando neste aparelho.",
+        tag: "ca-alerta-primeiro-teste"
+      });
       await checkExpiringNotifications();
     } else {
       showToast("Notificações não ativadas", "A permissão foi bloqueada ou recusada no navegador.", true);
@@ -393,7 +487,7 @@ async function requestNotifications() {
 }
 
 async function checkExpiringNotifications() {
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (!supportsSystemNotifications() || Notification.permission !== "granted") return;
   const urgent = state.certificates
     .filter(item => ["vencido", "urgente", "atencao"].includes(getStatus(item).key))
     .sort((a, b) => localDate(a.expiry) - localDate(b.expiry));
@@ -979,7 +1073,26 @@ document.addEventListener("keydown", event => {
 });
 document.querySelector("#closeDialog").addEventListener("click", () => els.dialog.close());
 document.querySelector("#closeToast").addEventListener("click", () => els.toast.classList.remove("show"));
-els.enableNotificationsButton.addEventListener("click", requestNotifications);
+document.querySelector("#closeInstallDialog").addEventListener("click", closeInstallDialog);
+document.querySelector("#confirmInstallDialog").addEventListener("click", closeInstallDialog);
+els.installAppButton.addEventListener("click", async () => {
+  if (!deferredInstallPrompt) {
+    openInstallDialog();
+    return;
+  }
+
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  updateInstallExperience();
+});
+els.enableNotificationsButton.addEventListener("click", () => {
+  if (els.enableNotificationsButton.dataset.action === "install") {
+    openInstallDialog();
+    return;
+  }
+  requestNotifications();
+});
 els.clearDataButton.addEventListener("click", async () => {
   if (!window.confirm("Deseja apagar todas as planilhas e certificados salvos neste navegador?")) return;
   localStorage.removeItem(STORAGE_KEY);
@@ -1004,8 +1117,25 @@ els.clearDataButton.addEventListener("click", async () => {
   showToast("Base removida", "O site está pronto para receber uma nova planilha.");
 });
 
+window.addEventListener("beforeinstallprompt", event => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  updateInstallExperience();
+});
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  updateInstallExperience();
+  updateNotificationSetup();
+});
+window.matchMedia("(display-mode: standalone)").addEventListener?.("change", () => {
+  updateInstallExperience();
+  updateNotificationSetup();
+});
+
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  navigator.serviceWorker.register("sw.js")
+    .then(() => updateNotificationSetup())
+    .catch(() => {});
 }
 
 render();

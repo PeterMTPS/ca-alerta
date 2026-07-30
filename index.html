@@ -2,12 +2,18 @@
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="description" content="Acompanhe vencimentos de Certificados de Aprovação a partir de uma planilha XLSX." />
     <meta name="theme-color" content="#0f755b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="CA Alerta" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="format-detection" content="telephone=no" />
     <title>CA Alerta</title>
     <link rel="manifest" href="manifest.json" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&amp;family=Manrope:wght@500;600;700;800&amp;display=swap" rel="stylesheet" />
@@ -37,6 +43,17 @@
     </header>
 
     <main>
+      <section class="install-prompt" id="installPrompt" hidden>
+        <span class="install-prompt-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M9 18h6M12 5v8m0 0 3-3m-3 3-3-3"/></svg>
+        </span>
+        <div>
+          <strong id="installPromptTitle">Use o CA Alerta como aplicativo</strong>
+          <p id="installPromptText">Instale na Tela de Início para abrir em tela cheia e ativar notificações compatíveis.</p>
+        </div>
+        <button id="installAppButton" type="button">Como instalar</button>
+      </section>
+
       <section class="upload-view" id="uploadState">
         <div class="upload-copy">
           <span class="eyebrow">CONTROLE DE CONFORMIDADE</span>
@@ -165,6 +182,20 @@
         <div class="dialog-wide"><small>Referência / CNAE</small><strong id="dialogReference">—</strong></div>
       </div>
       <div class="dialog-status" id="dialogStatus"></div>
+    </dialog>
+
+    <dialog class="install-dialog" id="installDialog">
+      <button class="dialog-close" id="closeInstallDialog" aria-label="Fechar">×</button>
+      <span class="eyebrow">INSTALAR NO IPHONE</span>
+      <h2>Adicione o CA Alerta à Tela de Início</h2>
+      <ol>
+        <li>Abra este endereço no <strong>Safari</strong>.</li>
+        <li>Toque no botão <strong>Compartilhar</strong> na barra do Safari.</li>
+        <li>Escolha <strong>Adicionar à Tela de Início</strong> e confirme.</li>
+        <li>Abra o novo ícone <strong>CA Alerta</strong> e toque em <strong>Ativar notificações</strong>.</li>
+      </ol>
+      <p class="install-requirement">As notificações no iPhone exigem iOS 16.4 ou superior e só podem ser ativadas dentro do app aberto pela Tela de Início.</p>
+      <button class="install-dialog-confirm" id="confirmInstallDialog" type="button">Entendi</button>
     </dialog>
 
     <script src="app.js"></script>
