@@ -12,6 +12,7 @@ let linkedFilesInitialized = false;
 let fileSyncInProgress = false;
 let fileSyncTimer = null;
 let deferredInstallPrompt = null;
+let swRegistrationFailed = false;
 const savedBase = loadPersistentBase();
 
 const state = {
@@ -89,11 +90,18 @@ function isStandaloneApp() {
   return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 }
 
-function supportsSystemNotifications() {
-  return "Notification" in window
-    && "serviceWorker" in navigator
+function supportsPageNotifications() {
+  return typeof Notification === "function";
+}
+
+function supportsServiceWorkerNotifications() {
+  return "serviceWorker" in navigator
     && "ServiceWorkerRegistration" in window
-    && "showNotification" in ServiceWorkerRegistration.prototype;
+    && typeof ServiceWorkerRegistration.prototype.showNotification === "function";
+}
+
+function supportsSystemNotifications() {
+  return supportsPageNotifications();
 }
 
 function openInstallDialog() {
@@ -448,14 +456,18 @@ async function showBrowserNotification(title, options = {}) {
     badge: new URL("icon-192.png", document.baseURI).href,
     ...options
   };
-  if ("serviceWorker" in navigator && location.protocol !== "file:") {
-    const registration = await navigator.serviceWorker.ready;
-    if ("showNotification" in registration) {
-      await registration.showNotification(title, notificationOptions);
-      return;
+  if (supportsServiceWorkerNotifications() && !swRegistrationFailed && location.protocol !== "file:") {
+    try {
+      const registration = await navigator.serviceWorker.getRegistration();
+      if (registration && typeof registration.showNotification === "function") {
+        await registration.showNotification(title, notificationOptions);
+        return;
+      }
+    } catch (error) {
+      console.warn("Não foi possível exibir a notificação pelo service worker; usando o modo da página.", error);
     }
   }
-  if (typeof Notification === "function") {
+  if (supportsPageNotifications()) {
     new Notification(title, notificationOptions);
     return;
   }
@@ -1134,8 +1146,15 @@ window.matchMedia("(display-mode: standalone)").addEventListener?.("change", () 
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   navigator.serviceWorker.register("sw.js")
-    .then(() => updateNotificationSetup())
-    .catch(() => {});
+    .then(() => {
+      swRegistrationFailed = false;
+      updateNotificationSetup();
+    })
+    .catch(error => {
+      swRegistrationFailed = true;
+      console.warn("Não foi possível registrar o service worker; notificações usarão o modo da página.", error);
+      updateNotificationSetup();
+    });
 }
 
 render();
