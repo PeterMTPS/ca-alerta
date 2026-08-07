@@ -1,8 +1,9 @@
-const CACHE_NAME = "ca-alerta-v5";
+const CACHE_NAME = "ca-alerta-v8";
 const APP_FILES = [
   "./",
   "./index.html",
   "./styles.css",
+  "./push-config.js",
   "./app.js",
   "./manifest.json",
   "./icon.svg",
@@ -14,6 +15,22 @@ const APP_FILES = [
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_FILES)));
   self.skipWaiting();
+});
+
+self.addEventListener("push", event => {
+  let payload = {};
+  try {
+    payload = event.data?.json() || {};
+  } catch {
+    payload = { body: event.data?.text() || "Há itens que precisam de acompanhamento." };
+  }
+  event.waitUntil(self.registration.showNotification(payload.title || "CA Alerta", {
+    body: payload.body || "Abra o aplicativo para conferir os alertas de hoje.",
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    tag: payload.tag || "ca-alerta-diario",
+    data: { url: payload.url || "./#certificados" }
+  }));
 });
 
 self.addEventListener("activate", event => {

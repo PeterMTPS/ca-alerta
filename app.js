@@ -1,5 +1,6 @@
 const STORAGE_KEY = "ca-alerta-base-v1";
 const NOTIFIED_KEY = "ca-alerta-notified-v1";
+const PUSH_DEVICE_KEY = "ca-alerta-push-device-v1";
 const FILE_HANDLE_DB = "ca-alerta-file-handles-v1";
 const FILE_HANDLE_STORE = "handles";
 const FILE_SYNC_INTERVAL = 5000;
@@ -13,12 +14,21 @@ let fileSyncInProgress = false;
 let fileSyncTimer = null;
 let deferredInstallPrompt = null;
 let swRegistrationFailed = false;
+let dailyPushActive = false;
+let dailyPushSyncTimer = null;
+let pendingColumnMapping = null;
+const pushConfig = Object.freeze({
+  apiBaseUrl: String(window.CA_ALERTA_PUSH_CONFIG?.apiBaseUrl || "").replace(/\/$/, ""),
+  vapidPublicKey: String(window.CA_ALERTA_PUSH_CONFIG?.vapidPublicKey || "")
+});
 const savedBase = loadPersistentBase();
 
 const state = {
   certificates: savedBase.certificates,
   sources: savedBase.sources,
+  tasks: savedBase.tasks,
   updatedAt: savedBase.updatedAt,
+  changedAt: savedBase.changedAt,
   query: "",
   filter: "todos"
 };
@@ -47,6 +57,13 @@ const els = {
   panel: document.querySelector("#notificationPanel"),
   notifications: document.querySelector("#notificationList"),
   dialog: document.querySelector("#detailDialog"),
+  taskList: document.querySelector("#taskList"),
+  tasksEmpty: document.querySelector("#tasksEmpty"),
+  taskDialog: document.querySelector("#taskDialog"),
+  taskForm: document.querySelector("#taskForm"),
+  taskCertificate: document.querySelector("#taskCertificate"),
+  columnMappingDialog: document.querySelector("#columnMappingDialog"),
+  columnMappingForm: document.querySelector("#columnMappingForm"),
   toast: document.querySelector("#toast")
 };
 
@@ -62,19 +79,39 @@ function loadPersistentBase() {
         sourceNames: Array.isArray(item.sourceNames) ? item.sourceNames : legacySourceNames
       })),
       sources,
-      updatedAt: saved.updatedAt || null
+      tasks: Array.isArray(saved.tasks) ? saved.tasks.map(normalizeSavedTask).filter(Boolean) : [],
+      updatedAt: saved.updatedAt || null,
+      changedAt: saved.changedAt || saved.updatedAt || null
     };
   } catch {
-    return { certificates: [], sources: [], updatedAt: null };
+    return { certificates: [], sources: [], tasks: [], updatedAt: null, changedAt: null };
   }
 }
 
+function normalizeSavedTask(task) {
+  if (!task || !task.id || !task.title || !isValidIsoDate(task.dueDate)) return null;
+  return {
+    id: String(task.id),
+    title: String(task.title).slice(0, 120),
+    dueDate: task.dueDate,
+    notes: String(task.notes || "").slice(0, 500),
+    certificateKey: String(task.certificateKey || ""),
+    status: task.status === "done" ? "done" : "pending",
+    createdAt: task.createdAt || new Date().toISOString(),
+    completedAt: task.status === "done" ? task.completedAt || new Date().toISOString() : null
+  };
+}
+
 function savePersistentBase(base = state) {
+  const changedAt = base.changedAt || new Date().toISOString();
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    certificates: base.certificates,
-    sources: base.sources,
-    updatedAt: base.updatedAt
+    certificates: base.certificates || [],
+    sources: base.sources || [],
+    tasks: base.tasks || state.tasks || [],
+    updatedAt: base.updatedAt || null,
+    changedAt
   }));
+  scheduleDailyPushSync();
 }
 
 function supportsLinkedFiles() {
@@ -102,6 +139,114 @@ function supportsServiceWorkerNotifications() {
 
 function supportsSystemNotifications() {
   return supportsPageNotifications();
+}
+
+function dailyPushIsConfigured() {
+  try {
+    const url = new URL(pushConfig.apiBaseUrl);
+    const secureEnough = url.protocol === "https:" || ["localhost", "127.0.0.1"].includes(url.hostname);
+    return secureEnough && pushConfig.vapidPublicKey.length > 40;
+  } catch {
+    return false;
+  }
+}
+
+function supportsWebPush() {
+  return supportsServiceWorkerNotifications()
+    && "PushManager" in window
+    && location.protocol !== "file:";
+}
+
+function getPushDeviceSecret(create = false) {
+  let secret = localStorage.getItem(PUSH_DEVICE_KEY) || "";
+  if (!secret && create) {
+    const bytes = new Uint8Array(32);
+    window.crypto.getRandomValues(bytes);
+    secret = `device_${btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+    localStorage.setItem(PUSH_DEVICE_KEY, secret);
+  }
+  return secret;
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+}
+
+function buildDailyReminderSnapshot(certificates, tasks) {
+  const certificateReminders = certificates
+    .filter(item => isValidIsoDate(item.expiry))
+    .map(item => ({ kind: "certificate", dueDate: item.expiry }));
+  const taskReminders = tasks
+    .filter(task => task.status !== "done" && isValidIsoDate(task.dueDate))
+    .map(task => ({ kind: "task", dueDate: task.dueDate }));
+  return [...certificateReminders, ...taskReminders];
+}
+
+function dailyReminderSnapshot() {
+  return buildDailyReminderSnapshot(state.certificates, state.tasks);
+}
+
+async function pushApiRequest(path, options = {}) {
+  const { secret: suppliedSecret, ...requestOptions } = options;
+  const secret = suppliedSecret || getPushDeviceSecret();
+  if (!dailyPushIsConfigured()) throw new Error("O serviço de notificações diárias ainda não foi publicado.");
+  if (!secret) throw new Error("Este aparelho ainda não foi registrado para notificações diárias.");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(`${pushConfig.apiBaseUrl}${path}`, {
+      ...requestOptions,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${secret}`,
+        ...(requestOptions.headers || {})
+      }
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "O serviço de notificações não respondeu corretamente.");
+    return body;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function scheduleDailyPushSync() {
+  if (!dailyPushIsConfigured() || !getPushDeviceSecret() || !supportsSystemNotifications() || Notification.permission !== "granted") return;
+  clearTimeout(dailyPushSyncTimer);
+  dailyPushSyncTimer = setTimeout(() => {
+    syncDailyPush().catch(error => console.warn("Não foi possível atualizar os alertas diários.", error));
+  }, 900);
+}
+
+async function syncDailyPush({ allowSubscribe = false } = {}) {
+  if (!dailyPushIsConfigured() || !supportsWebPush() || !supportsSystemNotifications() || Notification.permission !== "granted") return false;
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (!registration?.pushManager) return false;
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription && allowSubscribe) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(pushConfig.vapidPublicKey)
+    });
+  }
+  if (!subscription) return false;
+  const secret = getPushDeviceSecret(true);
+  await pushApiRequest("/api/devices/me", {
+    method: "PUT",
+    secret,
+    body: JSON.stringify({
+      subscription: subscription.toJSON(),
+      reminders: dailyReminderSnapshot(),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Sao_Paulo",
+      appUrl: new URL(".", location.href).href
+    })
+  });
+  dailyPushActive = true;
+  updateNotificationSetup();
+  return true;
 }
 
 function openInstallDialog() {
@@ -313,6 +458,83 @@ function searchableCertificateText(item) {
   return [item.company, item.cnpj, item.registration, item.reference, item.cnae].filter(Boolean).join(" ");
 }
 
+function taskStatus(task) {
+  if (task.status === "done") return { key: "done", label: "Concluída" };
+  const days = daysUntil(task.dueDate);
+  if (days < 0) return { key: "overdue", label: `${Math.abs(days)} ${Math.abs(days) === 1 ? "dia" : "dias"} em atraso` };
+  if (days === 0) return { key: "today", label: "Vence hoje" };
+  if (days === 1) return { key: "upcoming", label: "Amanhã" };
+  return { key: "upcoming", label: `${days} dias` };
+}
+
+function taskCertificate(task) {
+  return state.certificates.find(item => certificateKey(item) === task.certificateKey) || null;
+}
+
+function taskReminderItems() {
+  return state.tasks
+    .filter(task => task.status !== "done" && daysUntil(task.dueDate) <= 7)
+    .sort((a, b) => localDate(a.dueDate) - localDate(b.dueDate));
+}
+
+function renderTasks() {
+  const tasks = [...state.tasks].sort((a, b) => {
+    if ((a.status === "done") !== (b.status === "done")) return a.status === "done" ? 1 : -1;
+    return localDate(a.dueDate) - localDate(b.dueDate);
+  });
+  const pending = tasks.filter(task => task.status !== "done");
+  const overdue = pending.filter(task => daysUntil(task.dueDate) < 0).length;
+  document.querySelector("#taskSummary").textContent = pending.length
+    ? `${pending.length} pendente(s)${overdue ? ` · ${overdue} atrasada(s)` : ""}`
+    : "Nenhuma tarefa pendente.";
+  els.tasksEmpty.hidden = tasks.length > 0;
+  els.taskList.hidden = tasks.length === 0;
+  els.taskList.innerHTML = tasks.map(task => {
+    const status = taskStatus(task);
+    const certificate = taskCertificate(task);
+    const context = certificate ? `${certificate.company} · ${certificateDisplay(certificate).code}` : "Tarefa geral";
+    const notes = task.notes ? ` · ${task.notes}` : "";
+    return `<article class="task-item ${task.status === "done" ? "done" : ""}">
+      <button class="task-check" type="button" data-task-toggle="${escapeHtml(task.id)}" aria-label="${task.status === "done" ? "Reabrir" : "Concluir"} ${escapeHtml(task.title)}">✓</button>
+      <div class="task-copy"><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(context + notes)}</p></div>
+      <div class="task-actions"><span class="task-due ${status.key}">${escapeHtml(status.label)} · ${formatDate(task.dueDate)}</span><button type="button" data-task-edit="${escapeHtml(task.id)}" aria-label="Editar tarefa">✎</button><button type="button" data-task-delete="${escapeHtml(task.id)}" aria-label="Excluir tarefa">×</button></div>
+    </article>`;
+  }).join("");
+}
+
+function makeId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function openTaskDialog(task = null) {
+  document.querySelector("#taskDialogTitle").textContent = task ? "Editar tarefa" : "Nova tarefa";
+  document.querySelector("#taskId").value = task?.id || "";
+  document.querySelector("#taskTitle").value = task?.title || "";
+  document.querySelector("#taskDueDate").value = task?.dueDate || new Date().toLocaleDateString("en-CA");
+  document.querySelector("#taskNotes").value = task?.notes || "";
+  els.taskCertificate.innerHTML = `<option value="">Nenhum certificado</option>${state.certificates
+    .slice().sort((a, b) => a.company.localeCompare(b.company, "pt-BR"))
+    .map(item => `<option value="${escapeHtml(certificateKey(item))}">${escapeHtml(`${item.company} · ${certificateDisplay(item).code}`)}</option>`).join("")}`;
+  els.taskCertificate.value = task?.certificateKey || "";
+  if (typeof els.taskDialog.showModal === "function") els.taskDialog.showModal();
+  else els.taskDialog.setAttribute("open", "");
+  setTimeout(() => document.querySelector("#taskTitle").focus(), 0);
+}
+
+function closeTaskDialog() {
+  if (typeof els.taskDialog.close === "function") els.taskDialog.close();
+  else els.taskDialog.removeAttribute("open");
+}
+
+function persistTaskChange(message) {
+  state.changedAt = new Date().toISOString();
+  savePersistentBase();
+  render();
+  showToast("Tarefas atualizadas", message);
+  safelyCheckExpiringNotifications();
+}
+
 function filteredCertificates() {
   const query = state.query.trim().toLocaleLowerCase("pt-BR");
   return state.certificates
@@ -322,7 +544,7 @@ function filteredCertificates() {
 }
 
 function render() {
-  const hasData = state.certificates.length > 0;
+  const hasData = state.certificates.length > 0 || state.tasks.length > 0;
   updateInstallExperience();
   els.uploadState.hidden = hasData;
   els.dataView.hidden = !hasData;
@@ -356,13 +578,16 @@ function render() {
   document.querySelector("table").hidden = filtered.length === 0;
   document.querySelector("#resultSummary").textContent = `${filtered.length} ${filtered.length === 1 ? "registro encontrado" : "registros encontrados"}`;
   document.querySelector("#paginationText").textContent = `Mostrando ${filtered.length} de ${state.certificates.length} registros`;
-  const sourceLabel = state.sources.length === 1 ? state.sources[0].name : `${state.sources.length} planilhas combinadas`;
+  const sourceLabel = state.sources.length === 0
+    ? "Nenhuma planilha importada"
+    : state.sources.length === 1 ? state.sources[0].name : `${state.sources.length} planilhas combinadas`;
   document.querySelector("#currentFileName").textContent = sourceLabel;
   document.querySelector("#currentFileName").title = state.sources.map(source => source.name).join(", ");
   document.querySelector("#lastUpdated").textContent = state.updatedAt
     ? `Atualizada em ${new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(state.updatedAt))}`
     : "Base restaurada";
   renderStats();
+  renderTasks();
   renderNotifications();
   updateNotificationSetup();
 }
@@ -378,8 +603,9 @@ function renderStats() {
   const priorities = counts.vencido + counts.urgente + counts.atencao;
   document.querySelector("#insightTitle").textContent = priorities ? `${priorities} ${priorities === 1 ? "certificado requer" : "certificados requerem"} sua atenção` : "Seus certificados estão em dia";
   document.querySelector("#insightText").textContent = priorities ? `Há ${counts.vencido} vencido(s), ${counts.urgente} em até 30 dias e ${counts.atencao} na janela de renovação de ${RENEWAL_MONTHS} meses.` : `Nenhuma renovação prevista para os próximos ${RENEWAL_MONTHS} meses.`;
-  document.querySelector("#notificationDot").hidden = priorities === 0;
-  updateAppBadge(priorities);
+  const totalAlerts = priorities + taskReminderItems().length;
+  document.querySelector("#notificationDot").hidden = totalAlerts === 0;
+  updateAppBadge(totalAlerts);
 }
 
 function updateAppBadge(count) {
@@ -396,12 +622,18 @@ function updateAppBadge(count) {
 
 function renderNotifications() {
   const urgent = state.certificates.filter(item => ["vencido", "urgente", "atencao"].includes(getStatus(item).key)).sort((a, b) => localDate(a.expiry) - localDate(b.expiry));
-  document.querySelector("#alertCount").textContent = urgent.length;
-  els.notifications.innerHTML = urgent.length ? urgent.map(item => {
+  const taskReminders = taskReminderItems();
+  document.querySelector("#alertCount").textContent = urgent.length + taskReminders.length;
+  const certificateHtml = urgent.map(item => {
     const status = getStatus(item);
     const certificate = certificateDisplay(item);
     return `<div class="notification-item"><span class="notification-symbol ${status.key}">${status.key === "vencido" ? "!" : "◷"}</span><div><strong>${escapeHtml(item.company)}</strong><p>${escapeHtml(certificate.code)} · ${status.key === "vencido" ? "está vencido" : `vence em ${daysUntil(item.expiry)} dias`} · ${formatDate(item.expiry)}</p></div></div>`;
-  }).join("") : `<div class="notification-empty">Tudo certo por aqui. Nenhum CA na janela de renovação.</div>`;
+  }).join("");
+  const taskHtml = taskReminders.map(task => {
+    const status = taskStatus(task);
+    return `<div class="notification-item"><span class="notification-symbol ${status.key === "overdue" ? "vencido" : "urgente"}">✓</span><div><strong>${escapeHtml(task.title)}</strong><p>Tarefa · ${escapeHtml(status.label)} · ${formatDate(task.dueDate)}</p></div></div>`;
+  }).join("");
+  els.notifications.innerHTML = certificateHtml + taskHtml || `<div class="notification-empty">Tudo certo por aqui. Nenhum CA ou tarefa requer atenção.</div>`;
 }
 
 function updateNotificationSetup() {
@@ -433,9 +665,19 @@ function updateNotificationSetup() {
 
   if (Notification.permission === "granted") {
     els.notificationSetup.classList.add("enabled");
-    title.textContent = "Notificações ativadas";
-    text.textContent = `Os avisos são verificados quando você abre ou volta ao app. Toque ao lado para testar agora.`;
-    els.enableNotificationsButton.textContent = "Testar aviso";
+    if (dailyPushActive) {
+      title.textContent = "Notificações diárias ativadas";
+      text.textContent = "Um resumo será enviado diariamente às 9h quando houver certificados ou tarefas que precisem de atenção.";
+      els.enableNotificationsButton.textContent = "Testar aviso";
+    } else if (dailyPushIsConfigured() && supportsWebPush()) {
+      title.textContent = "Conclua a ativação dos avisos diários";
+      text.textContent = "Toque ao lado para registrar este aparelho e receber alertas mesmo com o app fechado.";
+      els.enableNotificationsButton.textContent = "Ativar diário";
+    } else {
+      title.textContent = "Notificações locais ativadas";
+      text.textContent = "Os avisos são verificados ao abrir o app. O serviço diário ainda precisa ser publicado.";
+      els.enableNotificationsButton.textContent = "Testar aviso";
+    }
   } else if (Notification.permission === "denied") {
     els.notificationSetup.classList.add("blocked");
     title.textContent = "Notificações bloqueadas";
@@ -444,7 +686,9 @@ function updateNotificationSetup() {
     els.enableNotificationsButton.disabled = true;
   } else {
     title.textContent = "Ative os avisos de vencimento";
-    text.textContent = `Receba uma notificação para CAs vencidos ou que vencem nos próximos ${RENEWAL_MONTHS} meses.`;
+    text.textContent = dailyPushIsConfigured()
+      ? `Receba diariamente um resumo de CAs e tarefas, mesmo com o app fechado.`
+      : `Receba uma notificação para CAs vencidos ou que vencem nos próximos ${RENEWAL_MONTHS} meses.`;
     els.enableNotificationsButton.textContent = "Ativar notificações";
     els.enableNotificationsButton.disabled = false;
   }
@@ -478,6 +722,10 @@ async function requestNotifications() {
   if (!supportsSystemNotifications()) return;
   try {
     if (Notification.permission === "granted") {
+      await syncDailyPush({ allowSubscribe: true }).catch(error => {
+        console.warn("Não foi possível ativar as notificações diárias.", error);
+        showToast("Aviso diário não conectado", error.message, true);
+      });
       await showBrowserNotification("CA Alerta está ativo", { body: "Os avisos de vencimento estão funcionando.", tag: "ca-alerta-teste" });
       return;
     }
@@ -485,6 +733,10 @@ async function requestNotifications() {
     updateNotificationSetup();
     if (permission === "granted") {
       showToast("Notificações ativadas", "Você receberá avisos sobre os CAs prioritários.");
+      await syncDailyPush({ allowSubscribe: true }).catch(error => {
+        console.warn("Não foi possível ativar as notificações diárias.", error);
+        showToast("Aviso diário não conectado", error.message, true);
+      });
       await showBrowserNotification("CA Alerta está ativo", {
         body: "Os avisos estão funcionando neste aparelho.",
         tag: "ca-alerta-primeiro-teste"
@@ -503,12 +755,16 @@ async function checkExpiringNotifications() {
   const urgent = state.certificates
     .filter(item => ["vencido", "urgente", "atencao"].includes(getStatus(item).key))
     .sort((a, b) => localDate(a.expiry) - localDate(b.expiry));
-  if (!urgent.length) return;
+  const taskReminders = taskReminderItems();
+  if (!urgent.length && !taskReminders.length) return;
 
   const todayKey = new Date().toLocaleDateString("en-CA");
   let notified = {};
   try { notified = JSON.parse(localStorage.getItem(NOTIFIED_KEY)) || {}; } catch { notified = {}; }
-  const signature = urgent.map(item => `${certificateKey(item)}|${item.expiry}|${getStatus(item).key}`).join(";");
+  const signature = [
+    ...urgent.map(item => `ca|${certificateKey(item)}|${item.expiry}|${getStatus(item).key}`),
+    ...taskReminders.map(task => `task|${task.id}|${task.dueDate}|${task.status}`)
+  ].join(";");
   let signatureHash = 0;
   for (let index = 0; index < signature.length; index++) signatureHash = (signatureHash * 31 + signature.charCodeAt(index)) >>> 0;
   const recordKey = `summary|${todayKey}|${signatureHash.toString(36)}`;
@@ -516,10 +772,15 @@ async function checkExpiringNotifications() {
 
   const counts = { vencido: 0, urgente: 0, atencao: 0 };
   urgent.forEach(item => counts[getStatus(item).key]++);
-  await showBrowserNotification(`${urgent.length} ${urgent.length === 1 ? "CA precisa" : "CAs precisam"} de acompanhamento`, {
-    body: `${counts.vencido} vencido(s), ${counts.urgente} em até 30 dias e ${counts.atencao} na janela de ${RENEWAL_MONTHS} meses. Abra o painel para ver os clientes.`,
+  const total = urgent.length + taskReminders.length;
+  const title = taskReminders.length
+    ? `${total} ${total === 1 ? "item precisa" : "itens precisam"} de acompanhamento`
+    : `${urgent.length} ${urgent.length === 1 ? "CA precisa" : "CAs precisam"} de acompanhamento`;
+  const taskText = taskReminders.length ? ` ${taskReminders.length} tarefa(s) vencem em até 7 dias ou estão atrasadas.` : "";
+  await showBrowserNotification(title, {
+    body: `${counts.vencido} CA(s) vencido(s), ${counts.urgente} em até 30 dias e ${counts.atencao} na janela de ${RENEWAL_MONTHS} meses.${taskText}`,
     tag: `ca-alerta-resumo-${todayKey}`,
-    data: { url: location.href.split("#")[0] + "#certificados" }
+    data: { url: location.href.split("#")[0] + (taskReminders.length ? "#tarefas" : "#certificados") }
   });
   notified[recordKey] = Date.now();
 
@@ -677,6 +938,79 @@ function detectColumns(header) {
   };
 }
 
+function bestHeaderIndex(rows) {
+  let best = { index: -1, score: -1 };
+  rows.slice(0, 30).forEach((row, index) => {
+    const detected = detectColumns(row);
+    const populated = Object.values(row).filter(value => String(value ?? "").trim()).length;
+    const score = Object.values(detected).filter(Boolean).length * 3
+      + (detected.cnpj ? 5 : 0)
+      + (detected.company ? 5 : 0)
+      + (detected.expiry ? 5 : 0)
+      + Math.min(populated, 6);
+    if (score > best.score) best = { index, score };
+  });
+  return best.index;
+}
+
+function mappingIsUsable(rows, mapping) {
+  if (!mapping || !Number.isInteger(mapping.headerIndex) || !rows[mapping.headerIndex]) return false;
+  const columns = mapping.columns || {};
+  return [columns.cnpj, columns.company, columns.expiry].every(column => column && Object.hasOwn(rows[mapping.headerIndex], column));
+}
+
+function mappingColumnOptions(header, selected = "", optional = false) {
+  const options = Object.keys(header)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    .map(column => `<option value="${escapeHtml(column)}" ${column === selected ? "selected" : ""}>${escapeHtml(`${column} — ${String(header[column] || "(sem título)").trim()}`)}</option>`)
+    .join("");
+  return `<option value="">${optional ? "Não importar" : "Selecione uma coluna"}</option>${options}`;
+}
+
+function populateColumnMappingFields(headerIndex, preferredColumns = {}) {
+  if (!pendingColumnMapping) return;
+  const header = pendingColumnMapping.rows[headerIndex] || {};
+  const detected = detectColumns(header);
+  const selections = { ...detected, ...preferredColumns };
+  const fields = [
+    ["mappingCnpj", "cnpj", false],
+    ["mappingCompany", "company", false],
+    ["mappingExpiry", "expiry", false],
+    ["mappingRegistration", "registration", true],
+    ["mappingReference", "reference", true],
+    ["mappingCnae", "cnae", true]
+  ];
+  fields.forEach(([id, key, optional]) => {
+    document.querySelector(`#${id}`).innerHTML = mappingColumnOptions(header, selections[key], optional);
+  });
+}
+
+function requestColumnMapping(rows, suggestedHeaderIndex = bestHeaderIndex(rows), suggestedColumns = {}) {
+  return new Promise((resolve, reject) => {
+    pendingColumnMapping = { rows, resolve, reject };
+    const headerRows = rows.slice(0, 30)
+      .map((row, index) => ({ index, values: Object.values(row).filter(value => String(value ?? "").trim()).slice(0, 4) }))
+      .filter(item => item.values.length);
+    const headerSelect = document.querySelector("#mappingHeaderRow");
+    headerSelect.innerHTML = headerRows.map(item => `<option value="${item.index}" ${item.index === suggestedHeaderIndex ? "selected" : ""}>Linha ${item.index + 1} — ${escapeHtml(item.values.join(" · "))}</option>`).join("");
+    const selectedIndex = Number(headerSelect.value || suggestedHeaderIndex || 0);
+    populateColumnMappingFields(selectedIndex, suggestedColumns);
+    if (typeof els.columnMappingDialog.showModal === "function") els.columnMappingDialog.showModal();
+    else els.columnMappingDialog.setAttribute("open", "");
+  });
+}
+
+function closeColumnMappingDialog(cancel = true) {
+  if (typeof els.columnMappingDialog.close === "function") els.columnMappingDialog.close();
+  else els.columnMappingDialog.removeAttribute("open");
+  if (cancel && pendingColumnMapping) {
+    const error = new Error("Importação cancelada.");
+    error.name = "AbortError";
+    pendingColumnMapping.reject(error);
+  }
+  pendingColumnMapping = null;
+}
+
 function rowToCertificate(row, cols, date1904) {
   const expiryRaw = row[cols.expiry];
   const expiry = /^\d+(\.\d+)?$/.test(expiryRaw) ? excelSerialToIso(expiryRaw, date1904) : normalizeDate(expiryRaw);
@@ -722,21 +1056,28 @@ function parseCertificateRows(rows, cols, date1904, headerIndex) {
   return { certificates, rejected };
 }
 
-async function parseXlsx(file) {
+async function parseXlsx(file, options = {}) {
   const files = await unzipXlsx(await file.arrayBuffer());
   const sharedDoc = new DOMParser().parseFromString(files.get("xl/sharedStrings.xml") || "<sst/>", "application/xml");
   const shared = [...sharedDoc.querySelectorAll("si")].map(si => [...si.querySelectorAll("t")].map(t => t.textContent).join(""));
   const { date1904, sheetName } = workbookInfo(files);
   if (!sheetName) throw new Error("Nenhuma aba de dados foi encontrada.");
   const rows = readSheetRows(files.get(sheetName), shared);
-  const headerIndex = rows.findIndex(row => {
-    const values = Object.values(row).map(normalizeHeader);
-    return values.some(value => /\bcnpj\b/.test(value)) && values.some(value => /expira|vencimento|validade/.test(value));
-  });
-  if (headerIndex < 0) throw new Error("Cabeçalhos CNPJ e Data de Validade não encontrados.");
-  const cols = detectColumns(rows[headerIndex]);
-  if (!cols.cnpj || !cols.company || !cols.expiry) throw new Error("A planilha precisa conter CNPJ, Razão Social e Data de Validade.");
-  return parseCertificateRows(rows, cols, date1904, headerIndex);
+  if (!rows.length) throw new Error("A primeira aba da planilha está vazia.");
+
+  let headerIndex = mappingIsUsable(rows, options.mapping) ? options.mapping.headerIndex : bestHeaderIndex(rows);
+  if (headerIndex < 0) headerIndex = 0;
+  let cols = mappingIsUsable(rows, options.mapping) ? options.mapping.columns : detectColumns(rows[headerIndex]);
+  if (options.forceMapping || !cols.cnpj || !cols.company || !cols.expiry) {
+    if (options.automatic) {
+      throw new Error("As colunas mudaram. Importe a planilha manualmente para refazer o mapeamento.");
+    }
+    const mapping = await requestColumnMapping(rows, headerIndex, cols);
+    headerIndex = mapping.headerIndex;
+    cols = mapping.columns;
+  }
+  const parsed = parseCertificateRows(rows, cols, date1904, headerIndex);
+  return { ...parsed, mapping: { headerIndex, columns: cols } };
 }
 
 function normalizeDate(value) {
@@ -816,7 +1157,12 @@ async function handleFile(file, options = {}) {
     return false;
   }
   try {
-    const { certificates: imported, rejected } = await parseXlsx(file);
+    const source = state.sources.find(item => item.name === file.name);
+    const { certificates: imported, rejected, mapping } = await parseXlsx(file, {
+      mapping: source?.mapping,
+      automatic: Boolean(options.automatic),
+      forceMapping: Boolean(options.forceMapping)
+    });
     if (rejected.length) {
       const preview = rejected.slice(0, 3)
         .map(item => `linha ${item.rowNumber}: ${item.reasons.join(", ")}`)
@@ -838,10 +1184,13 @@ async function handleFile(file, options = {}) {
         size: Number(file.size) || null
       }
     ];
-    savePersistentBase({ certificates: merged.certificates, sources, updatedAt: importedAt });
+    const changedAt = importedAt;
+    sources[sources.length - 1].mapping = mapping;
+    savePersistentBase({ certificates: merged.certificates, sources, tasks: state.tasks, updatedAt: importedAt, changedAt });
     state.certificates = merged.certificates;
     state.sources = sources;
     state.updatedAt = importedAt;
+    state.changedAt = changedAt;
     state.filter = "todos";
     state.query = "";
     els.search.value = "";
@@ -854,6 +1203,7 @@ async function handleFile(file, options = {}) {
         : "Planilha adicionada";
     showToast(title, `${merged.added} novo(s), ${merged.updated} atualizado(s) e ${merged.removed} removido(s).`);
   } catch (error) {
+    if (error?.name === "AbortError") return false;
     const title = options.automatic ? "Não foi possível atualizar a planilha" : "Não foi possível importar";
     if (!options.silentError) {
       showToast(title, error.message || "Revise a estrutura da planilha e tente novamente.", true);
@@ -1058,6 +1408,84 @@ document.querySelector("#viewUrgentButton").addEventListener("click", () => {
   const priority = ["vencido", "urgente", "atencao"].find(key => state.certificates.some(item => getStatus(item).key === key));
   setFilter(priority || "todos");
 });
+document.querySelector("#newTaskButton").addEventListener("click", () => openTaskDialog());
+document.querySelector("#emptyTaskButton").addEventListener("click", () => openTaskDialog());
+document.querySelector("#closeTaskDialog").addEventListener("click", closeTaskDialog);
+document.querySelector("#cancelTaskButton").addEventListener("click", closeTaskDialog);
+document.querySelector("#mappingHeaderRow").addEventListener("change", event => {
+  populateColumnMappingFields(Number(event.target.value));
+});
+document.querySelector("#closeColumnMappingDialog").addEventListener("click", () => closeColumnMappingDialog(true));
+document.querySelector("#cancelColumnMappingButton").addEventListener("click", () => closeColumnMappingDialog(true));
+els.columnMappingDialog.addEventListener("cancel", event => {
+  event.preventDefault();
+  closeColumnMappingDialog(true);
+});
+els.columnMappingForm.addEventListener("submit", event => {
+  event.preventDefault();
+  if (!pendingColumnMapping) return;
+  const mapping = {
+    headerIndex: Number(document.querySelector("#mappingHeaderRow").value),
+    columns: {
+      cnpj: document.querySelector("#mappingCnpj").value,
+      company: document.querySelector("#mappingCompany").value,
+      expiry: document.querySelector("#mappingExpiry").value,
+      registration: document.querySelector("#mappingRegistration").value || undefined,
+      reference: document.querySelector("#mappingReference").value || undefined,
+      cnae: document.querySelector("#mappingCnae").value || undefined
+    }
+  };
+  if (!mapping.columns.cnpj || !mapping.columns.company || !mapping.columns.expiry) {
+    showToast("Mapeamento incompleto", "Selecione CNPJ, Razão Social e Data de Validade.", true);
+    return;
+  }
+  const resolve = pendingColumnMapping.resolve;
+  closeColumnMappingDialog(false);
+  resolve(mapping);
+});
+els.taskForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const id = document.querySelector("#taskId").value;
+  const existing = state.tasks.find(task => task.id === id);
+  const task = normalizeSavedTask({
+    id: id || makeId(),
+    title: document.querySelector("#taskTitle").value.trim(),
+    dueDate: document.querySelector("#taskDueDate").value,
+    certificateKey: els.taskCertificate.value,
+    notes: document.querySelector("#taskNotes").value.trim(),
+    status: existing?.status || "pending",
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    completedAt: existing?.completedAt || null
+  });
+  if (!task) {
+    showToast("Tarefa incompleta", "Informe um título e uma data de prazo válida.", true);
+    return;
+  }
+  state.tasks = existing ? state.tasks.map(item => item.id === id ? task : item) : [...state.tasks, task];
+  closeTaskDialog();
+  persistTaskChange(existing ? "A tarefa foi atualizada." : "O novo lembrete foi criado.");
+});
+els.taskList.addEventListener("click", event => {
+  const toggle = event.target.closest("[data-task-toggle]");
+  const edit = event.target.closest("[data-task-edit]");
+  const remove = event.target.closest("[data-task-delete]");
+  if (toggle) {
+    const now = new Date().toISOString();
+    state.tasks = state.tasks.map(task => task.id === toggle.dataset.taskToggle
+      ? { ...task, status: task.status === "done" ? "pending" : "done", completedAt: task.status === "done" ? null : now }
+      : task);
+    persistTaskChange("O status da tarefa foi alterado.");
+  } else if (edit) {
+    const task = state.tasks.find(item => item.id === edit.dataset.taskEdit);
+    if (task) openTaskDialog(task);
+  } else if (remove) {
+    const task = state.tasks.find(item => item.id === remove.dataset.taskDelete);
+    if (task && window.confirm(`Excluir a tarefa “${task.title}”?`)) {
+      state.tasks = state.tasks.filter(item => item.id !== task.id);
+      persistTaskChange("A tarefa foi excluída.");
+    }
+  }
+});
 els.rows.addEventListener("click", event => {
   const button = event.target.closest("[data-detail]");
   if (button) showDetail(Number(button.dataset.detail));
@@ -1106,7 +1534,7 @@ els.enableNotificationsButton.addEventListener("click", () => {
   requestNotifications();
 });
 els.clearDataButton.addEventListener("click", async () => {
-  if (!window.confirm("Deseja apagar todas as planilhas e certificados salvos neste navegador?")) return;
+  if (!window.confirm("Deseja apagar todas as planilhas, certificados e tarefas salvos neste navegador?")) return;
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem(NOTIFIED_KEY);
   try {
@@ -1120,13 +1548,16 @@ els.clearDataButton.addEventListener("click", async () => {
   linkedFileErrors.clear();
   state.certificates = [];
   state.sources = [];
+  state.tasks = [];
   state.updatedAt = null;
+  state.changedAt = new Date().toISOString();
   state.query = "";
   state.filter = "todos";
   els.search.value = "";
   els.filter.value = "todos";
   render();
-  showToast("Base removida", "O site está pronto para receber uma nova planilha.");
+  scheduleDailyPushSync();
+  showToast("Base removida", "Planilhas, certificados e tarefas foram removidos deste navegador.");
 });
 
 window.addEventListener("beforeinstallprompt", event => {
@@ -1149,6 +1580,7 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
     .then(() => {
       swRegistrationFailed = false;
       updateNotificationSetup();
+      syncDailyPush().catch(error => console.warn("Não foi possível restaurar os alertas diários.", error));
     })
     .catch(error => {
       swRegistrationFailed = true;
@@ -1159,11 +1591,13 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
 
 render();
 initializeLinkedFiles();
+setTimeout(() => syncDailyPush().catch(() => {}), 900);
 setTimeout(safelyCheckExpiringNotifications, 1200);
 setInterval(safelyCheckExpiringNotifications, 6 * 60 * 60 * 1000);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     safelyCheckExpiringNotifications();
     checkLinkedFiles();
+    syncDailyPush().catch(() => {});
   }
 });

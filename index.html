@@ -80,6 +80,7 @@
             <div><strong>Atualização automática</strong><p>No Chrome ou Edge, vincule o arquivo para refletir alterações salvas pelo Excel enquanto o app estiver aberto.</p></div>
           </div>
         </div>
+        <button class="empty-task-button" id="emptyTaskButton" type="button">+ Criar tarefa sem planilha</button>
       </section>
 
       <section class="dashboard-view" id="dataView" hidden>
@@ -106,7 +107,7 @@
 
         <section class="notification-setup" id="notificationSetup">
           <span class="notification-setup-icon"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg></span>
-          <div><strong id="notificationSetupTitle">Ative os avisos de vencimento</strong><p id="notificationSetupText">Receba uma notificação para CAs vencidos ou que vencem nos próximos 8 meses.</p></div>
+          <div><strong id="notificationSetupTitle">Ative os avisos de vencimento</strong><p id="notificationSetupText">Receba diariamente um resumo dos CAs e tarefas que precisam de atenção.</p></div>
           <button id="enableNotificationsButton" type="button">Ativar notificações</button>
         </section>
 
@@ -133,6 +134,15 @@
           <div class="insight-visual"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg></div>
           <div class="insight-copy"><span class="eyebrow">RESUMO DOS ALERTAS</span><h2 id="insightTitle">Seus certificados estão em dia</h2><p id="insightText">Nenhuma renovação urgente foi encontrada.</p></div>
           <button id="viewUrgentButton" type="button">Ver prioridades <span>→</span></button>
+        </section>
+
+        <section class="tasks-section" id="tarefas">
+          <div class="tasks-head">
+            <div><span class="eyebrow">ACOMPANHAMENTO</span><h2>Tarefas e lembretes</h2><p id="taskSummary">Nenhuma tarefa pendente.</p></div>
+            <button class="primary-action" id="newTaskButton" type="button">+ Nova tarefa</button>
+          </div>
+          <div class="task-list" id="taskList"></div>
+          <div class="tasks-empty" id="tasksEmpty"><span>✓</span><strong>Tudo organizado</strong><p>Crie lembretes para renovações, contatos e documentos.</p></div>
         </section>
 
         <section class="table-section" id="certificados">
@@ -198,6 +208,40 @@
       <button class="install-dialog-confirm" id="confirmInstallDialog" type="button">Entendi</button>
     </dialog>
 
+    <dialog class="form-dialog" id="taskDialog">
+      <button class="dialog-close" id="closeTaskDialog" type="button" aria-label="Fechar">×</button>
+      <span class="eyebrow">LEMBRETE</span>
+      <h2 id="taskDialogTitle">Nova tarefa</h2>
+      <form id="taskForm">
+        <input id="taskId" type="hidden" />
+        <label>Título <input id="taskTitle" name="title" maxlength="120" required placeholder="Ex.: Solicitar documentos ao cliente" /></label>
+        <label>Prazo <input id="taskDueDate" name="dueDate" type="date" required /></label>
+        <label>Certificado relacionado <select id="taskCertificate" name="certificate"><option value="">Nenhum certificado</option></select></label>
+        <label>Observações <textarea id="taskNotes" name="notes" maxlength="500" rows="4" placeholder="Detalhes opcionais"></textarea></label>
+        <div class="dialog-actions"><button class="secondary-action" id="cancelTaskButton" type="button">Cancelar</button><button class="primary-action" type="submit">Salvar tarefa</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="form-dialog mapping-dialog" id="columnMappingDialog">
+      <button class="dialog-close" id="closeColumnMappingDialog" type="button" aria-label="Cancelar">×</button>
+      <span class="eyebrow">IMPORTAÇÃO FLEXÍVEL</span>
+      <h2>Identifique as colunas da planilha</h2>
+      <p class="dialog-intro">Escolha onde estão os dados. O CA Alerta guardará este mapeamento para as próximas atualizações do mesmo arquivo.</p>
+      <form id="columnMappingForm">
+        <label>Linha dos cabeçalhos <select id="mappingHeaderRow" required></select></label>
+        <div class="mapping-grid">
+          <label>CNPJ <select id="mappingCnpj" required></select></label>
+          <label>Razão Social <select id="mappingCompany" required></select></label>
+          <label>Data de Validade <select id="mappingExpiry" required></select></label>
+          <label>Registro CA <select id="mappingRegistration"></select></label>
+          <label>Referência <select id="mappingReference"></select></label>
+          <label>CNAE <select id="mappingCnae"></select></label>
+        </div>
+        <div class="dialog-actions"><button class="secondary-action" id="cancelColumnMappingButton" type="button">Cancelar</button><button class="primary-action" type="submit">Importar planilha</button></div>
+      </form>
+    </dialog>
+
+    <script src="push-config.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
