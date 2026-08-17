@@ -19,6 +19,10 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .brand-mark { width: 35px; height: 35px; display: grid; place-items: center; color: #fff; background: var(--green); border-radius: 10px; box-shadow: 0 6px 14px rgba(15,117,91,.2); }
 .brand-mark svg { width: 23px; height: 23px; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
+.tasks-button { height: 42px; padding: 0 13px; display: flex; align-items: center; gap: 8px; position: relative; border: 1px solid var(--line); border-radius: 11px; color: #436057; background: #fff; font-size: 12px; font-weight: 700; }
+.tasks-button:hover { border-color: #a9cbbf; color: var(--green); background: var(--green-soft); }
+.tasks-button svg { width: 18px; height: 18px; }
+.task-badge { min-width: 20px; height: 20px; padding: 0 5px; display: grid; place-items: center; border-radius: 99px; color: #fff; background: var(--danger); font-size: 9px; font-weight: 800; line-height: 1; }
 .icon-button { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 11px; color: #52635d; background: #fff; }
 .notification-button { position: relative; }
 .notification-dot { position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border: 2px solid #fff; border-radius: 50%; background: var(--danger); box-sizing: content-box; }
@@ -101,7 +105,7 @@ h1 { font-size: clamp(29px, 4vw, 46px); line-height: 1.12; }
 .insight-visual { width:52px; height:52px; flex:0 0 auto; display:grid; place-items:center; position:relative; z-index:1; border-radius:15px; background:rgba(255,255,255,.13); }
 .insight-copy { flex:1; position:relative; z-index:1; }.insight-copy .eyebrow { color:#a9decf; }.insight-copy h2 { margin-top:4px; font-size:17px; }.insight-copy p { margin:4px 0 0; color:#cae6de; font-size:12px; }
 .insight-card button { position:relative; z-index:1; padding:10px 14px; border:1px solid rgba(255,255,255,.35); border-radius:9px; color:#fff; background:rgba(255,255,255,.1); font-size:11px; font-weight:700; }.insight-card button:hover { background:rgba(255,255,255,.19); }.insight-card button span { margin-left:8px; font-size:15px; }
-.tasks-section { margin-top: 22px; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: #fff; box-shadow: 0 7px 22px rgba(37,66,55,.035); }
+.tasks-section { overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: #fff; box-shadow: 0 7px 22px rgba(37,66,55,.035); }
 .tasks-head { min-height: 86px; padding: 20px 22px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line); }
 .tasks-head h2 { margin-top: 3px; font-size: 17px; }
 .tasks-head p { margin: 4px 0 0; color: #89958f; font-size: 11px; }
@@ -152,6 +156,10 @@ dialog { width:min(540px,calc(100vw - 32px)); padding:28px; border:0; border-rad
 .install-requirement { margin: 16px 0; padding: 12px; border-radius: 10px; color: #77532e; background: var(--warning-soft); font-size: 10px; line-height: 1.5; }
 .install-dialog-confirm { width: 100%; }
 .form-dialog { max-height: calc(100dvh - 32px); overflow: auto; }
+.tasks-manager-dialog { width: min(920px,calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: auto; }
+.tasks-manager-dialog .dialog-close { z-index: 2; }
+.tasks-manager-dialog .tasks-section { border: 0; border-radius: 0; box-shadow: none; }
+.tasks-manager-dialog .tasks-head { padding-right: 64px; }
 .dialog-intro { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .form-dialog form { margin-top: 22px; display: grid; gap: 15px; }
 .form-dialog label { display: grid; gap: 6px; color: #52645d; font-size: 10px; font-weight: 700; }
@@ -202,6 +210,9 @@ dialog { width:min(540px,calc(100vw - 32px)); padding:28px; border:0; border-rad
   .brand-mark { width: 32px; height: 32px; }
   .import-button { width: 44px; padding: 0; justify-content: center; }
   .import-button span { display: none; }
+  .tasks-button { width: 44px; padding: 0; justify-content: center; }
+  .tasks-button > span:not(.task-badge) { display: none; }
+  .tasks-button .task-badge { min-width: 18px; height: 18px; padding: 0 4px; position: absolute; top: -5px; right: -5px; border: 2px solid #fff; }
   .install-prompt { align-items: flex-start; flex-wrap: wrap; }
   .install-prompt div { min-width: calc(100% - 55px); }
   .install-prompt button { width: 100%; }
@@ -220,8 +231,10 @@ dialog { width:min(540px,calc(100vw - 32px)); padding:28px; border:0; border-rad
   .table-actions { align-items: stretch; flex-direction: column; }
   .tasks-head { flex-direction: column; }
   .tasks-head .primary-action { width: 100%; }
+  .tasks-manager-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
+  .tasks-manager-dialog .tasks-head { padding: 22px 56px 18px 18px; }
   .task-item { grid-template-columns: auto minmax(0,1fr); padding: 14px; }
-  .task-actions { grid-column: 2; justify-content: flex-end; }
+  .task-actions { grid-column: 1 / -1; margin-left: 37px; justify-content: flex-start; }
   .task-due { margin-right: auto; }
   .mapping-grid { grid-template-columns: 1fr; }
   .dialog-actions { align-items: stretch; flex-direction: column-reverse; }

@@ -43,6 +43,9 @@ const els = {
   dataView: document.querySelector("#dataView"),
   dropZone: document.querySelector("#dropZone"),
   selectFileLabel: document.querySelector("#selectFileLabel"),
+  tasksButton: document.querySelector("#tasksButton"),
+  taskBadge: document.querySelector("#taskBadge"),
+  tasksManagerDialog: document.querySelector("#tasksManagerDialog"),
   notificationButton: document.querySelector("#notificationButton"),
   notificationSetup: document.querySelector("#notificationSetup"),
   enableNotificationsButton: document.querySelector("#enableNotificationsButton"),
@@ -484,6 +487,11 @@ function renderTasks() {
   });
   const pending = tasks.filter(task => task.status !== "done");
   const overdue = pending.filter(task => daysUntil(task.dueDate) < 0).length;
+  els.taskBadge.textContent = pending.length > 99 ? "99+" : String(pending.length);
+  els.taskBadge.hidden = pending.length === 0;
+  els.tasksButton.setAttribute("aria-label", pending.length
+    ? `Abrir acompanhamento, ${pending.length} ${pending.length === 1 ? "tarefa pendente" : "tarefas pendentes"}`
+    : "Abrir acompanhamento");
   document.querySelector("#taskSummary").textContent = pending.length
     ? `${pending.length} pendente(s)${overdue ? ` · ${overdue} atrasada(s)` : ""}`
     : "Nenhuma tarefa pendente.";
@@ -505,6 +513,24 @@ function renderTasks() {
 function makeId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function openTasksManager() {
+  if (els.tasksManagerDialog.open) return;
+  if (typeof els.tasksManagerDialog.showModal === "function") els.tasksManagerDialog.showModal();
+  else els.tasksManagerDialog.setAttribute("open", "");
+  els.tasksButton.setAttribute("aria-expanded", "true");
+}
+
+function closeTasksManager() {
+  if (!els.tasksManagerDialog.hasAttribute("open")) return;
+  if (typeof els.tasksManagerDialog.close === "function") els.tasksManagerDialog.close();
+  else els.tasksManagerDialog.removeAttribute("open");
+  els.tasksButton.setAttribute("aria-expanded", "false");
+}
+
+function openHashTarget() {
+  if (location.hash === "#tarefas") openTasksManager();
 }
 
 function openTaskDialog(task = null) {
@@ -548,6 +574,7 @@ function render() {
   updateInstallExperience();
   els.uploadState.hidden = hasData;
   els.dataView.hidden = !hasData;
+  els.tasksButton.hidden = !hasData;
   els.notificationButton.hidden = !hasData;
   document.querySelector("#importButtonLabel").textContent = supportsLinkedFiles()
     ? (hasData ? "Vincular outro XLSX" : "Vincular XLSX")
@@ -556,6 +583,7 @@ function render() {
   updateFileSyncStatus();
   if (!hasData) {
     closeNotificationPanel();
+    closeTasksManager();
     return;
   }
 
@@ -1408,6 +1436,12 @@ document.querySelector("#viewUrgentButton").addEventListener("click", () => {
   const priority = ["vencido", "urgente", "atencao"].find(key => state.certificates.some(item => getStatus(item).key === key));
   setFilter(priority || "todos");
 });
+els.tasksButton.addEventListener("click", openTasksManager);
+document.querySelector("#closeTasksManagerDialog").addEventListener("click", closeTasksManager);
+els.tasksManagerDialog.addEventListener("close", () => els.tasksButton.setAttribute("aria-expanded", "false"));
+els.tasksManagerDialog.addEventListener("click", event => {
+  if (event.target === els.tasksManagerDialog) closeTasksManager();
+});
 document.querySelector("#newTaskButton").addEventListener("click", () => openTaskDialog());
 document.querySelector("#emptyTaskButton").addEventListener("click", () => openTaskDialog());
 document.querySelector("#closeTaskDialog").addEventListener("click", closeTaskDialog);
@@ -1464,6 +1498,7 @@ els.taskForm.addEventListener("submit", event => {
   state.tasks = existing ? state.tasks.map(item => item.id === id ? task : item) : [...state.tasks, task];
   closeTaskDialog();
   persistTaskChange(existing ? "A tarefa foi atualizada." : "O novo lembrete foi criado.");
+  if (!existing) openTasksManager();
 });
 els.taskList.addEventListener("click", event => {
   const toggle = event.target.closest("[data-task-toggle]");
@@ -1574,6 +1609,7 @@ window.matchMedia("(display-mode: standalone)").addEventListener?.("change", () 
   updateInstallExperience();
   updateNotificationSetup();
 });
+window.addEventListener("hashchange", openHashTarget);
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   navigator.serviceWorker.register("sw.js")
@@ -1591,6 +1627,7 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
 
 render();
 initializeLinkedFiles();
+setTimeout(openHashTarget, 0);
 setTimeout(() => syncDailyPush().catch(() => {}), 900);
 setTimeout(safelyCheckExpiringNotifications, 1200);
 setInterval(safelyCheckExpiringNotifications, 6 * 60 * 60 * 1000);

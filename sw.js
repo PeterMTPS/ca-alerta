@@ -1,4 +1,4 @@
-const CACHE_NAME = "ca-alerta-v8";
+const CACHE_NAME = "ca-alerta-v9";
 const APP_FILES = [
   "./",
   "./index.html",
