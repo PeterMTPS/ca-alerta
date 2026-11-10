@@ -59,7 +59,7 @@
         <button id="installAppButton" type="button">Como instalar</button>
       </section>
 
-      <section class="upload-view" id="uploadState">
+      <section class="upload-view" id="uploadState" hidden>
         <div class="upload-copy">
           <span class="eyebrow">CONTROLE DE CONFORMIDADE</span>
           <h1>Descubra quais CAs estão perto de vencer</h1>
@@ -165,7 +165,7 @@
             </table>
             <div class="empty-state" id="emptyState" hidden><span>⌕</span><h3>Nenhum certificado encontrado</h3><p>Ajuste a busca ou selecione outro status.</p></div>
           </div>
-          <div class="table-foot"><span id="paginationText">Mostrando 0 registros</span><div class="legend"><span><i class="dot danger"></i>Vencido</span><span><i class="dot warning"></i>Até 30 dias</span><span><i class="dot attention"></i>Até 8 meses</span><span><i class="dot success"></i>Além de 8 meses</span></div></div>
+          <div class="table-foot"><span id="paginationText">Mostrando 0 registros</span><button class="show-more-button" id="showMoreButton" type="button" hidden>Mostrar mais</button><div class="legend"><span><i class="dot danger"></i>Vencido</span><span><i class="dot warning"></i>Até 30 dias</span><span><i class="dot attention"></i>Até 8 meses</span><span><i class="dot success"></i>Além de 8 meses</span></div></div>
         </section>
       </section>
     </main>

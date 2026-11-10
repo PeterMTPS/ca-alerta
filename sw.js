@@ -1,4 +1,4 @@
-const CACHE_NAME = "ca-alerta-v9";
+const CACHE_NAME = "ca-alerta-v10";
 const APP_FILES = [
   "./",
   "./index.html",
@@ -64,15 +64,19 @@ self.addEventListener("fetch", event => {
 
 self.addEventListener("notificationclick", event => {
   event.notification.close();
-  const targetUrl = event.notification.data?.url || "./#certificados";
-  event.waitUntil(
-    clients.matchAll({ type: "window", includeUncontrolled: true }).then(openClients => {
-      const existing = openClients[0];
-      if (existing) {
-        existing.navigate(targetUrl);
-        return existing.focus();
+  const targetUrl = new URL(event.notification.data?.url || "./#certificados", self.registration.scope).href;
+  event.waitUntil((async () => {
+    const openClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+    // No github.io outros sites do mesmo domínio também aparecem; usa só janelas deste app.
+    const existing = openClients.find(client => client.url.startsWith(self.registration.scope));
+    if (existing) {
+      try {
+        const navigated = await existing.navigate(targetUrl);
+        return (navigated || existing).focus();
+      } catch {
+        // Janelas não controladas pelo service worker não aceitam navigate().
       }
-      return clients.openWindow(targetUrl);
-    })
-  );
+    }
+    return clients.openWindow(targetUrl);
+  })());
 });

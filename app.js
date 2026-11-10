@@ -3,6 +3,11 @@ const NOTIFIED_KEY = "ca-alerta-notified-v1";
 const PUSH_DEVICE_KEY = "ca-alerta-push-device-v1";
 const FILE_HANDLE_DB = "ca-alerta-file-handles-v1";
 const FILE_HANDLE_STORE = "handles";
+const DATA_DB = "ca-alerta-data-v1";
+const DATA_STORE = "base";
+const DATA_RECORD = "current";
+const ROWS_PAGE_SIZE = 200;
+const NOTIFICATION_PANEL_LIMIT = 100;
 const FILE_SYNC_INTERVAL = 5000;
 const RENEWAL_MONTHS = 8;
 const linkedFileHandles = new Map();
@@ -17,18 +22,24 @@ let swRegistrationFailed = false;
 let dailyPushActive = false;
 let dailyPushSyncTimer = null;
 let pendingColumnMapping = null;
+let dailyPushTime = "09:00";
+let indexedStorageAvailable = true;
+let dataDatabasePromise = null;
+let persistentStorageRequested = false;
+let searchTimer = null;
 const pushConfig = Object.freeze({
   apiBaseUrl: String(window.CA_ALERTA_PUSH_CONFIG?.apiBaseUrl || "").replace(/\/$/, ""),
   vapidPublicKey: String(window.CA_ALERTA_PUSH_CONFIG?.vapidPublicKey || "")
 });
-const savedBase = loadPersistentBase();
-
+// A base começa vazia e é carregada do IndexedDB em startApp().
 const state = {
-  certificates: savedBase.certificates,
-  sources: savedBase.sources,
-  tasks: savedBase.tasks,
-  updatedAt: savedBase.updatedAt,
-  changedAt: savedBase.changedAt,
+  certificates: [],
+  sources: [],
+  tasks: [],
+  updatedAt: null,
+  changedAt: null,
+  loaded: false,
+  visibleRows: ROWS_PAGE_SIZE,
   query: "",
   filter: "todos"
 };
@@ -57,6 +68,7 @@ const els = {
   clearDataButton: document.querySelector("#clearDataButton"),
   syncStatus: document.querySelector("#syncStatus"),
   syncFilesButton: document.querySelector("#syncFilesButton"),
+  showMoreButton: document.querySelector("#showMoreButton"),
   panel: document.querySelector("#notificationPanel"),
   notifications: document.querySelector("#notificationList"),
   dialog: document.querySelector("#detailDialog"),
@@ -70,25 +82,128 @@ const els = {
   toast: document.querySelector("#toast")
 };
 
-function loadPersistentBase() {
+function emptyBase() {
+  return { certificates: [], sources: [], tasks: [], updatedAt: null, changedAt: null };
+}
+
+function normalizeSavedBase(saved) {
+  if (!saved || !Array.isArray(saved.certificates)) return emptyBase();
+  const sources = Array.isArray(saved.sources) ? saved.sources : [];
+  const legacySourceNames = sources.length === 1 ? [sources[0].name] : [];
+  return {
+    certificates: saved.certificates.map(item => ({
+      ...item,
+      sourceNames: Array.isArray(item.sourceNames) ? item.sourceNames : legacySourceNames
+    })),
+    sources,
+    tasks: Array.isArray(saved.tasks) ? saved.tasks.map(normalizeSavedTask).filter(Boolean) : [],
+    updatedAt: saved.updatedAt || null,
+    changedAt: saved.changedAt || saved.updatedAt || null
+  };
+}
+
+function readLegacyBase() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (!saved || !Array.isArray(saved.certificates)) throw new Error();
-    const sources = Array.isArray(saved.sources) ? saved.sources : [];
-    const legacySourceNames = sources.length === 1 ? [sources[0].name] : [];
-    return {
-      certificates: saved.certificates.map(item => ({
-        ...item,
-        sourceNames: Array.isArray(item.sourceNames) ? item.sourceNames : legacySourceNames
-      })),
-      sources,
-      tasks: Array.isArray(saved.tasks) ? saved.tasks.map(normalizeSavedTask).filter(Boolean) : [],
-      updatedAt: saved.updatedAt || null,
-      changedAt: saved.changedAt || saved.updatedAt || null
-    };
+    return JSON.parse(localStorage.getItem(STORAGE_KEY));
   } catch {
-    return { certificates: [], sources: [], tasks: [], updatedAt: null, changedAt: null };
+    return null;
   }
+}
+
+function removeLegacyBase() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Sem acesso ao localStorage não há cópia antiga para remover.
+  }
+}
+
+// O localStorage tem limite de ~5 milhões de caracteres; bases grandes ficam no IndexedDB.
+function openDataDatabase() {
+  if (!("indexedDB" in window)) return Promise.reject(new Error("IndexedDB indisponível."));
+  if (!dataDatabasePromise) {
+    dataDatabasePromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(DATA_DB, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(DATA_STORE)) request.result.createObjectStore(DATA_STORE);
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        database.onversionchange = () => {
+          database.close();
+          dataDatabasePromise = null;
+        };
+        resolve(database);
+      };
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error("O banco local está bloqueado por outra aba do CA Alerta."));
+    }).catch(error => {
+      dataDatabasePromise = null;
+      throw error;
+    });
+  }
+  return dataDatabasePromise;
+}
+
+async function readStoredBase() {
+  const database = await openDataDatabase();
+  const transaction = database.transaction(DATA_STORE, "readonly");
+  const completed = waitForTransaction(transaction);
+  const request = transaction.objectStore(DATA_STORE).get(DATA_RECORD);
+  const record = await new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await completed;
+  return record;
+}
+
+async function writeStoredBase(record) {
+  const database = await openDataDatabase();
+  const transaction = database.transaction(DATA_STORE, "readwrite");
+  const completed = waitForTransaction(transaction);
+  if (record) transaction.objectStore(DATA_STORE).put(record, DATA_RECORD);
+  else transaction.objectStore(DATA_STORE).delete(DATA_RECORD);
+  await completed;
+}
+
+async function loadPersistentBase() {
+  try {
+    const stored = await readStoredBase();
+    if (stored) {
+      removeLegacyBase();
+      return normalizeSavedBase(stored);
+    }
+    const legacy = readLegacyBase();
+    if (!legacy) return emptyBase();
+    // Migra a base antiga do localStorage uma única vez.
+    const base = normalizeSavedBase(legacy);
+    await writeStoredBase(serializableBase(base));
+    removeLegacyBase();
+    return base;
+  } catch (error) {
+    indexedStorageAvailable = false;
+    console.warn("IndexedDB indisponível; usando o armazenamento simples do navegador.", error);
+    return normalizeSavedBase(readLegacyBase());
+  }
+}
+
+function serializableBase(base) {
+  return {
+    certificates: base.certificates || [],
+    sources: base.sources || [],
+    tasks: base.tasks || state.tasks || [],
+    updatedAt: base.updatedAt || null,
+    changedAt: base.changedAt || new Date().toISOString()
+  };
+}
+
+function requestPersistentStorage() {
+  if (persistentStorageRequested || !navigator.storage?.persist) return;
+  persistentStorageRequested = true;
+  navigator.storage.persisted()
+    .then(persisted => persisted || navigator.storage.persist())
+    .catch(() => {});
 }
 
 function normalizeSavedTask(task) {
@@ -105,15 +220,18 @@ function normalizeSavedTask(task) {
   };
 }
 
-function savePersistentBase(base = state) {
-  const changedAt = base.changedAt || new Date().toISOString();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    certificates: base.certificates || [],
-    sources: base.sources || [],
-    tasks: base.tasks || state.tasks || [],
-    updatedAt: base.updatedAt || null,
-    changedAt
-  }));
+async function savePersistentBase(base = state) {
+  const record = serializableBase(base);
+  try {
+    if (indexedStorageAvailable) await writeStoredBase(record);
+    else localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+  } catch (error) {
+    if (error?.name === "QuotaExceededError") {
+      throw new Error("Não há espaço suficiente neste navegador para salvar a base. Libere espaço ou use uma versão atual do Chrome, Edge, Firefox ou Safari.");
+    }
+    throw error;
+  }
+  requestPersistentStorage();
   scheduleDailyPushSync();
 }
 
@@ -177,14 +295,19 @@ function urlBase64ToUint8Array(value) {
   return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
 }
 
+// Agrupa por tipo e data para manter o envio pequeno mesmo com dezenas de milhares de CAs.
 function buildDailyReminderSnapshot(certificates, tasks) {
-  const certificateReminders = certificates
-    .filter(item => isValidIsoDate(item.expiry))
-    .map(item => ({ kind: "certificate", dueDate: item.expiry }));
-  const taskReminders = tasks
-    .filter(task => task.status !== "done" && isValidIsoDate(task.dueDate))
-    .map(task => ({ kind: "task", dueDate: task.dueDate }));
-  return [...certificateReminders, ...taskReminders];
+  const counts = new Map();
+  const add = (kind, dueDate) => {
+    const key = `${kind}|${dueDate}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  };
+  certificates.forEach(item => { if (isValidIsoDate(item.expiry)) add("certificate", item.expiry); });
+  tasks.forEach(task => { if (task.status !== "done" && isValidIsoDate(task.dueDate)) add("task", task.dueDate); });
+  return [...counts].map(([key, count]) => {
+    const [kind, dueDate] = key.split("|");
+    return { kind, dueDate, count };
+  });
 }
 
 function dailyReminderSnapshot() {
@@ -224,7 +347,13 @@ function scheduleDailyPushSync() {
   }, 900);
 }
 
+function dailyPushTimeLabel() {
+  const [hour, minute] = dailyPushTime.split(":");
+  return minute && minute !== "00" ? `${Number(hour)}h${minute}` : `${Number(hour)}h`;
+}
+
 async function syncDailyPush({ allowSubscribe = false } = {}) {
+  if (!state.loaded) return false;
   if (!dailyPushIsConfigured() || !supportsWebPush() || !supportsSystemNotifications() || Notification.permission !== "granted") return false;
   const registration = await navigator.serviceWorker.getRegistration();
   if (!registration?.pushManager) return false;
@@ -237,7 +366,7 @@ async function syncDailyPush({ allowSubscribe = false } = {}) {
   }
   if (!subscription) return false;
   const secret = getPushDeviceSecret(true);
-  await pushApiRequest("/api/devices/me", {
+  const result = await pushApiRequest("/api/devices/me", {
     method: "PUT",
     secret,
     body: JSON.stringify({
@@ -247,6 +376,7 @@ async function syncDailyPush({ allowSubscribe = false } = {}) {
       appUrl: new URL(".", location.href).href
     })
   });
+  if (/^\d{2}:\d{2}$/.test(result?.dailyAt || "")) dailyPushTime = result.dailyAt;
   dailyPushActive = true;
   updateNotificationSetup();
   return true;
@@ -416,6 +546,11 @@ function renewalWindowEnd() {
   return addMonthsClamped(today, RENEWAL_MONTHS);
 }
 
+// Datas ISO (AAAA-MM-DD) ordenam corretamente como texto, sem criar objetos Date.
+function compareExpiry(a, b) {
+  return a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0;
+}
+
 function getStatus(certificate) {
   const days = daysUntil(certificate.expiry);
   if (days < 0) return { key: "vencido", label: "Vencido", detail: `${Math.abs(days)} ${Math.abs(days) === 1 ? "dia" : "dias"} em atraso` };
@@ -539,8 +674,9 @@ function openTaskDialog(task = null) {
   document.querySelector("#taskTitle").value = task?.title || "";
   document.querySelector("#taskDueDate").value = task?.dueDate || new Date().toLocaleDateString("en-CA");
   document.querySelector("#taskNotes").value = task?.notes || "";
+  const collator = new Intl.Collator("pt-BR");
   els.taskCertificate.innerHTML = `<option value="">Nenhum certificado</option>${state.certificates
-    .slice().sort((a, b) => a.company.localeCompare(b.company, "pt-BR"))
+    .slice().sort((a, b) => collator.compare(a.company, b.company))
     .map(item => `<option value="${escapeHtml(certificateKey(item))}">${escapeHtml(`${item.company} · ${certificateDisplay(item).code}`)}</option>`).join("")}`;
   els.taskCertificate.value = task?.certificateKey || "";
   if (typeof els.taskDialog.showModal === "function") els.taskDialog.showModal();
@@ -553,11 +689,15 @@ function closeTaskDialog() {
   else els.taskDialog.removeAttribute("open");
 }
 
-function persistTaskChange(message) {
+async function persistTaskChange(message) {
   state.changedAt = new Date().toISOString();
-  savePersistentBase();
   render();
-  showToast("Tarefas atualizadas", message);
+  try {
+    await savePersistentBase();
+    showToast("Tarefas atualizadas", message);
+  } catch (error) {
+    showToast("Tarefa não salva", error.message || "Não foi possível salvar a alteração neste navegador.", true);
+  }
   safelyCheckExpiringNotifications();
 }
 
@@ -566,10 +706,11 @@ function filteredCertificates() {
   return state.certificates
     .filter(item => state.filter === "todos" || getStatus(item).key === state.filter)
     .filter(item => !query || searchableCertificateText(item).toLocaleLowerCase("pt-BR").includes(query))
-    .sort((a, b) => localDate(a.expiry) - localDate(b.expiry));
+    .sort(compareExpiry);
 }
 
 function render() {
+  if (!state.loaded) return;
   const hasData = state.certificates.length > 0 || state.tasks.length > 0;
   updateInstallExperience();
   els.uploadState.hidden = hasData;
@@ -588,8 +729,10 @@ function render() {
   }
 
   const filtered = filteredCertificates();
+  // Desenhar dezenas de milhares de linhas trava a página; mostramos em blocos.
+  const visible = filtered.slice(0, state.visibleRows);
   const indexByItem = new Map(state.certificates.map((item, index) => [item, index]));
-  els.rows.innerHTML = filtered.map((item) => {
+  els.rows.innerHTML = visible.map((item) => {
     const status = getStatus(item);
     const certificate = certificateDisplay(item);
     const originalIndex = indexByItem.get(item);
@@ -605,7 +748,12 @@ function render() {
   els.empty.hidden = filtered.length > 0;
   document.querySelector("table").hidden = filtered.length === 0;
   document.querySelector("#resultSummary").textContent = `${filtered.length} ${filtered.length === 1 ? "registro encontrado" : "registros encontrados"}`;
-  document.querySelector("#paginationText").textContent = `Mostrando ${filtered.length} de ${state.certificates.length} registros`;
+  document.querySelector("#paginationText").textContent = filtered.length === state.certificates.length
+    ? `Mostrando ${visible.length} de ${filtered.length} registros`
+    : `Mostrando ${visible.length} de ${filtered.length} registros (base com ${state.certificates.length})`;
+  const hiddenRows = filtered.length - visible.length;
+  els.showMoreButton.hidden = hiddenRows <= 0;
+  els.showMoreButton.textContent = `Mostrar mais ${Math.min(ROWS_PAGE_SIZE, hiddenRows)}`;
   const sourceLabel = state.sources.length === 0
     ? "Nenhuma planilha importada"
     : state.sources.length === 1 ? state.sources[0].name : `${state.sources.length} planilhas combinadas`;
@@ -649,10 +797,14 @@ function updateAppBadge(count) {
 }
 
 function renderNotifications() {
-  const urgent = state.certificates.filter(item => ["vencido", "urgente", "atencao"].includes(getStatus(item).key)).sort((a, b) => localDate(a.expiry) - localDate(b.expiry));
+  const urgent = state.certificates.filter(item => ["vencido", "urgente", "atencao"].includes(getStatus(item).key)).sort(compareExpiry);
   const taskReminders = taskReminderItems();
   document.querySelector("#alertCount").textContent = urgent.length + taskReminders.length;
-  const certificateHtml = urgent.map(item => {
+  const hiddenAlerts = urgent.length - NOTIFICATION_PANEL_LIMIT;
+  const moreHtml = hiddenAlerts > 0
+    ? `<div class="notification-empty">E mais ${hiddenAlerts} certificado(s). Use os filtros do painel para ver todos.</div>`
+    : "";
+  const certificateHtml = urgent.slice(0, NOTIFICATION_PANEL_LIMIT).map(item => {
     const status = getStatus(item);
     const certificate = certificateDisplay(item);
     return `<div class="notification-item"><span class="notification-symbol ${status.key}">${status.key === "vencido" ? "!" : "◷"}</span><div><strong>${escapeHtml(item.company)}</strong><p>${escapeHtml(certificate.code)} · ${status.key === "vencido" ? "está vencido" : `vence em ${daysUntil(item.expiry)} dias`} · ${formatDate(item.expiry)}</p></div></div>`;
@@ -661,7 +813,7 @@ function renderNotifications() {
     const status = taskStatus(task);
     return `<div class="notification-item"><span class="notification-symbol ${status.key === "overdue" ? "vencido" : "urgente"}">✓</span><div><strong>${escapeHtml(task.title)}</strong><p>Tarefa · ${escapeHtml(status.label)} · ${formatDate(task.dueDate)}</p></div></div>`;
   }).join("");
-  els.notifications.innerHTML = certificateHtml + taskHtml || `<div class="notification-empty">Tudo certo por aqui. Nenhum CA ou tarefa requer atenção.</div>`;
+  els.notifications.innerHTML = certificateHtml + moreHtml + taskHtml || `<div class="notification-empty">Tudo certo por aqui. Nenhum CA ou tarefa requer atenção.</div>`;
 }
 
 function updateNotificationSetup() {
@@ -695,7 +847,7 @@ function updateNotificationSetup() {
     els.notificationSetup.classList.add("enabled");
     if (dailyPushActive) {
       title.textContent = "Notificações diárias ativadas";
-      text.textContent = "Um resumo será enviado diariamente às 9h quando houver certificados ou tarefas que precisem de atenção.";
+      text.textContent = `Um resumo será enviado diariamente a partir das ${dailyPushTimeLabel()} quando houver certificados ou tarefas que precisem de atenção.`;
       els.enableNotificationsButton.textContent = "Testar aviso";
     } else if (dailyPushIsConfigured() && supportsWebPush()) {
       title.textContent = "Conclua a ativação dos avisos diários";
@@ -779,10 +931,10 @@ async function requestNotifications() {
 }
 
 async function checkExpiringNotifications() {
-  if (!supportsSystemNotifications() || Notification.permission !== "granted") return;
+  if (!state.loaded || !supportsSystemNotifications() || Notification.permission !== "granted") return;
   const urgent = state.certificates
     .filter(item => ["vencido", "urgente", "atencao"].includes(getStatus(item).key))
-    .sort((a, b) => localDate(a.expiry) - localDate(b.expiry));
+    .sort(compareExpiry);
   const taskReminders = taskReminderItems();
   if (!urgent.length && !taskReminders.length) return;
 
@@ -827,6 +979,7 @@ async function safelyCheckExpiringNotifications() {
 
 function setFilter(filter) {
   state.filter = filter;
+  state.visibleRows = ROWS_PAGE_SIZE;
   els.filter.value = filter;
   render();
   document.querySelector("#certificados").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -866,6 +1019,9 @@ async function unzipXlsx(buffer) {
   if (end < 0) throw new Error("Arquivo XLSX inválido.");
   const entries = view.getUint16(end + 10, true);
   const centralOffset = view.getUint32(end + 16, true);
+  if (entries === 0xffff || centralOffset === 0xffffffff) {
+    throw new Error("Planilha grande demais para leitura (formato ZIP64). Divida a planilha em arquivos menores.");
+  }
   const files = new Map();
   let cursor = centralOffset;
   for (let i = 0; i < entries; i++) {
@@ -877,6 +1033,11 @@ async function unzipXlsx(buffer) {
     const commentLength = view.getUint16(cursor + 32, true);
     const localOffset = view.getUint32(cursor + 42, true);
     const name = new TextDecoder().decode(bytes.slice(cursor + 46, cursor + 46 + nameLength));
+    if (!/\.(xml|rels)$/i.test(name)) {
+      // Imagens e outros anexos não são necessários para ler os dados.
+      cursor += 46 + nameLength + extraLength + commentLength;
+      continue;
+    }
     const localNameLength = view.getUint16(localOffset + 26, true);
     const localExtraLength = view.getUint16(localOffset + 28, true);
     const start = localOffset + 30 + localNameLength + localExtraLength;
@@ -899,14 +1060,29 @@ function excelSerialToIso(serial, date1904 = false) {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
 }
 
+function columnName(index) {
+  let name = "";
+  for (let value = index + 1; value > 0; value = Math.floor((value - 1) / 26)) {
+    name = String.fromCharCode(65 + (value - 1) % 26) + name;
+  }
+  return name;
+}
+
+function columnIndex(name) {
+  return [...name].reduce((total, char) => total * 26 + char.charCodeAt(0) - 64, 0) - 1;
+}
+
 function readSheetRows(xml, sharedStrings) {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
-  return [...doc.querySelectorAll("sheetData row")].map(row => {
+  return [...doc.querySelectorAll("sheetData row")].map((row, position) => {
     const result = {};
     const cellTypes = {};
+    let nextColumn = 0;
     [...row.querySelectorAll(":scope > c")].forEach(cell => {
-      const column = String(cell.getAttribute("r") || "").replace(/\d/g, "");
-      if (!column) return;
+      // Alguns geradores de XLSX omitem a referência "r"; nesse caso a célula segue a anterior.
+      const reference = String(cell.getAttribute("r") || "").replace(/\d/g, "").toUpperCase();
+      const column = reference || columnName(nextColumn);
+      nextColumn = columnIndex(column) + 1;
       const type = cell.getAttribute("t") || "n";
       const inline = [...cell.querySelectorAll("is t")].map(node => node.textContent).join("");
       const raw = cell.querySelector("v")?.textContent ?? inline;
@@ -914,7 +1090,7 @@ function readSheetRows(xml, sharedStrings) {
       cellTypes[column] = type;
     });
     Object.defineProperties(result, {
-      __rowNumber: { value: Number(row.getAttribute("r")) || null },
+      __rowNumber: { value: Number(row.getAttribute("r")) || position + 1 },
       __cellTypes: { value: cellTypes }
     });
     return result;
@@ -1184,6 +1360,10 @@ async function handleFile(file, options = {}) {
     showToast("Arquivo não suportado", "Selecione uma planilha no formato .xlsx.", true);
     return false;
   }
+  if (!state.loaded) {
+    showToast("Aguarde um instante", "A base salva ainda está sendo carregada.", true);
+    return false;
+  }
   try {
     const source = state.sources.find(item => item.name === file.name);
     const { certificates: imported, rejected, mapping } = await parseXlsx(file, {
@@ -1214,13 +1394,14 @@ async function handleFile(file, options = {}) {
     ];
     const changedAt = importedAt;
     sources[sources.length - 1].mapping = mapping;
-    savePersistentBase({ certificates: merged.certificates, sources, tasks: state.tasks, updatedAt: importedAt, changedAt });
+    await savePersistentBase({ certificates: merged.certificates, sources, tasks: state.tasks, updatedAt: importedAt, changedAt });
     state.certificates = merged.certificates;
     state.sources = sources;
     state.updatedAt = importedAt;
     state.changedAt = changedAt;
     state.filter = "todos";
     state.query = "";
+    state.visibleRows = ROWS_PAGE_SIZE;
     els.search.value = "";
     els.filter.value = "todos";
     render();
@@ -1314,7 +1495,7 @@ async function selectSpreadsheet() {
 }
 
 async function checkLinkedFiles({ force = false, report = false } = {}) {
-  if (fileSyncInProgress || !linkedFileHandles.size || document.visibilityState === "hidden") return 0;
+  if (!state.loaded || fileSyncInProgress || !linkedFileHandles.size || document.visibilityState === "hidden") return 0;
   fileSyncInProgress = true;
   let updates = 0;
   try {
@@ -1422,8 +1603,24 @@ els.dropZone.addEventListener("drop", event => {
 });
 els.file.addEventListener("change", event => handleFile(event.target.files[0]));
 els.syncFilesButton.addEventListener("click", reconnectLinkedFiles);
-els.search.addEventListener("input", event => { state.query = event.target.value; render(); });
-els.filter.addEventListener("change", event => { state.filter = event.target.value; render(); });
+els.search.addEventListener("input", event => {
+  const value = event.target.value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.query = value;
+    state.visibleRows = ROWS_PAGE_SIZE;
+    render();
+  }, 150);
+});
+els.filter.addEventListener("change", event => {
+  state.filter = event.target.value;
+  state.visibleRows = ROWS_PAGE_SIZE;
+  render();
+});
+els.showMoreButton.addEventListener("click", () => {
+  state.visibleRows += ROWS_PAGE_SIZE;
+  render();
+});
 document.querySelectorAll(".stat-card").forEach(card => {
   card.addEventListener("click", () => setFilter(card.dataset.filter));
   card.addEventListener("keydown", event => {
@@ -1570,7 +1767,12 @@ els.enableNotificationsButton.addEventListener("click", () => {
 });
 els.clearDataButton.addEventListener("click", async () => {
   if (!window.confirm("Deseja apagar todas as planilhas, certificados e tarefas salvos neste navegador?")) return;
-  localStorage.removeItem(STORAGE_KEY);
+  try {
+    if (indexedStorageAvailable) await writeStoredBase(null);
+  } catch (error) {
+    console.warn("Não foi possível apagar a base do IndexedDB.", error);
+  }
+  removeLegacyBase();
   localStorage.removeItem(NOTIFIED_KEY);
   try {
     await clearLinkedFileHandles();
@@ -1588,6 +1790,7 @@ els.clearDataButton.addEventListener("click", async () => {
   state.changedAt = new Date().toISOString();
   state.query = "";
   state.filter = "todos";
+  state.visibleRows = ROWS_PAGE_SIZE;
   els.search.value = "";
   els.filter.value = "todos";
   render();
@@ -1625,12 +1828,18 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
     });
 }
 
-render();
-initializeLinkedFiles();
-setTimeout(openHashTarget, 0);
-setTimeout(() => syncDailyPush().catch(() => {}), 900);
-setTimeout(safelyCheckExpiringNotifications, 1200);
-setInterval(safelyCheckExpiringNotifications, 6 * 60 * 60 * 1000);
+async function startApp() {
+  Object.assign(state, await loadPersistentBase());
+  state.loaded = true;
+  render();
+  openHashTarget();
+  initializeLinkedFiles();
+  setTimeout(() => syncDailyPush().catch(() => {}), 900);
+  setTimeout(safelyCheckExpiringNotifications, 1200);
+  setInterval(safelyCheckExpiringNotifications, 6 * 60 * 60 * 1000);
+}
+
+startApp();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     safelyCheckExpiringNotifications();
